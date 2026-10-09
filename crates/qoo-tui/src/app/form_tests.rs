@@ -615,8 +615,8 @@ fn model_option_values(app: &App, repo: &str) -> Vec<String> {
 fn model_option_values_fall_back_to_builtin_catalog_when_settings_absent() {
     // Stale/absent settings → the built-in mirror (claude + grok groups; codex is
     // omitted from the mirror). Head "" first, then one `provider/label` per
-    // VISIBLE entry — grok/grok-composer-2.5-fast is hidden, so the grok group shows only
-    // grok-4.5.
+    // VISIBLE entry — the older grok entries and grok-composer-2.5-fast are
+    // hidden, so the grok group shows only grok-4.7.
     let app = launcher_app();
     assert_eq!(app.settings, None);
     assert_eq!(
@@ -627,7 +627,7 @@ fn model_option_values_fall_back_to_builtin_catalog_when_settings_absent() {
             "claude/claude-opus-4.8",
             "claude/claude-sonnet-5",
             "claude/claude-haiku-4.5",
-            "grok/grok-4.5",
+            "grok/grok-4.7",
         ]
     );
 }

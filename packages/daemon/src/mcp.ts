@@ -67,7 +67,7 @@ export function createMcpServer(caller: McpCaller): McpServer {
 				.union([z.string(), z.array(z.string())])
 				.optional()
 				.describe(
-					"Model for the run, as a provider/label ref (e.g. claude/claude-opus-5, grok/grok-4.5), or an ordered fallback list of such refs; defaults to the daemon default. A single-string ref is pinned (exact pick, no active-provider re-head). Every ref is validated against the catalog — an unknown ref fails the enqueue.",
+					"Model for the run, as a provider/label ref (e.g. claude/claude-opus-5, grok/grok-4.7), or an ordered fallback list of such refs; defaults to the daemon default. A single-string ref is pinned (exact pick, no active-provider re-head). Every ref is validated against the catalog — an unknown ref fails the enqueue.",
 				),
 			timeout: z
 				.string()
@@ -219,7 +219,7 @@ export function createMcpServer(caller: McpCaller): McpServer {
 				.union([z.string(), z.array(z.string())])
 				.optional()
 				.describe(
-					"Override the definition's authored model as a provider/label ref (e.g. claude/claude-fable-5, grok/grok-4.5), or an ordered fallback list of such refs. A single-string ref is pinned (exact pick, no active-provider re-head). Omit to leave task.model null so the definition's own model / default_models applies. Every ref is validated against the catalog — an unknown ref fails the run.",
+					"Override the definition's authored model as a provider/label ref (e.g. claude/claude-fable-5, grok/grok-4.7), or an ordered fallback list of such refs. A single-string ref is pinned (exact pick, no active-provider re-head). Omit to leave task.model null so the definition's own model / default_models applies. Every ref is validated against the catalog — an unknown ref fails the run.",
 				),
 		},
 		async (args) => toCallResult(mcpRunTaskDefinition(caller, args)),

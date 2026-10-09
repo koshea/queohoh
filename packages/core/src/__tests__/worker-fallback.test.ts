@@ -424,7 +424,7 @@ describe("runTask activeProvider vs resume pin", () => {
 		// Deliberate decision (documented on WorkerDeps.defaultModels): the worker
 		// passes defaultModels through verbatim and does NOT treat [] as "no
 		// runnable model". resolveModelChain still prepends the enabled active
-		// provider's group head, so the task runs — here on grok's head (grok-4.5).
+		// provider's group head, so the task runs — here on grok's head (grok-4.7).
 		const { deps, providers, taskId, seenProviders, runStore } =
 			makeFallbackDeps({
 				firstResult: okResult,
@@ -434,7 +434,7 @@ describe("runTask activeProvider vs resume pin", () => {
 		const out = await runTask(taskId, { ...deps, providers });
 		expect(out.status).toBe("done");
 		expect(seenProviders).toEqual(["grok"]);
-		expect(runStore.readRunMeta(taskId)?.model).toBe("grok-4.5");
+		expect(runStore.readRunMeta(taskId)?.model).toBe("grok-4.7");
 	});
 });
 
@@ -464,8 +464,8 @@ describe("runTask pinned resume — pin absent from resolved chain", () => {
 		expect(seenProviders).toEqual(["grok"]);
 		// The spec names no grok ref at all, so `refEntry` never matches and the
 		// else-branch falls through to `groupHead` — grok's most powerful model
-		// (grok-4.5), the group head, not some other grok entry.
-		expect(runStore.readRunMeta(taskId)?.model).toBe("grok-4.5");
+		// (grok-4.7), the group head, not some other grok entry.
+		expect(runStore.readRunMeta(taskId)?.model).toBe("grok-4.7");
 	});
 
 	it("ref-match sub-path: spec names the pinned provider directly, once attemptedModels has filtered it out of the chain", async () => {
@@ -478,7 +478,7 @@ describe("runTask pinned resume — pin absent from resolved chain", () => {
 				firstResult: okResult,
 				resumeSessionId: "s1",
 				// Names grok explicitly, but its SECOND entry (composer), not the
-				// group head (grok-4.5) — resolving to composer is the only way to
+				// group head (grok-4.7) — resolving to composer is the only way to
 				// prove this took the ref-match path rather than groupHead, which
 				// would also happen to land on a grok model but the wrong one.
 				model: "grok/grok-composer-2.5-fast",

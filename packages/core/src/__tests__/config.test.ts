@@ -442,13 +442,13 @@ describe("loadGlobalConfig — catalog overlay", () => {
 });
 
 describe("loadGlobalConfig — default_models", () => {
-	it("defaults to claude/claude-opus-5, grok/grok-4.5 when absent", () => {
+	it("defaults to claude/claude-opus-5, grok/grok-4.7 when absent", () => {
 		const dir = mkdtempSync(join(tmpdir(), "queohoh-cfg-dm-"));
 		const path = join(dir, "config.yaml");
 		writeFileSync(path, "projects: []\n");
 		expect(loadGlobalConfig(path).defaultModels).toEqual([
 			"claude/claude-opus-5",
-			"grok/grok-4.5",
+			"grok/grok-4.7",
 		]);
 	});
 
