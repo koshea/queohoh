@@ -18,7 +18,7 @@ import {
 	SessionLineageStore,
 	SessionRegistry,
 } from "@queohoh/core";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { adoptionDecision, Engine } from "../engine.js";
 
 /** Working provider table for tests that need a multi-provider chain.
@@ -1006,6 +1006,77 @@ describe("Engine git enrichment", () => {
 		await engine.refreshGitEnrichment(); // within TTL → no re-shell for same path
 		expect(counts.status).toBe(statusAfterFirst);
 		expect(counts.log).toBe(logAfterFirst);
+	});
+
+	describe("tiered TTL", () => {
+		/** Refresh at `offsetMs` past the real clock and report how many times
+		 * `git status` ran during that one refresh. */
+		async function statusCallsAt(
+			engine: Engine,
+			counts: Record<string, number>,
+			offsetMs: number,
+		): Promise<number> {
+			const before = counts.status ?? 0;
+			const real = Date.now();
+			const spy = vi.spyOn(Date, "now").mockReturnValue(real + offsetMs);
+			try {
+				await engine.refreshGitEnrichment();
+			} finally {
+				spy.mockRestore();
+			}
+			return (counts.status ?? 0) - before;
+		}
+
+		function countingExec(status: string, counts: Record<string, number>) {
+			return gitExec(
+				{
+					status: () => ({ stdout: status, exitCode: 0 }),
+					// epoch 1 → last commit decades ago, outside the hot window
+					log: () => ({ stdout: "1\tHopper\th@x\tabc\n", exitCode: 0 }),
+				},
+				(sub) => {
+					counts[sub] = (counts[sub] ?? 0) + 1;
+				},
+			);
+		}
+
+		it("serves a clean, idle, task-less worktree on the cold TTL", async () => {
+			const counts: Record<string, number> = {};
+			const { engine } = setup({ exec: countingExec("", counts) });
+			await engine.tick();
+			await engine.refreshGitEnrichment();
+			expect(await statusCallsAt(engine, counts, 11_000)).toBe(0);
+			expect(await statusCallsAt(engine, counts, 5 * 60_000 + 1_000)).toBe(1);
+		});
+
+		it("keeps a dirty worktree on the hot TTL", async () => {
+			const counts: Record<string, number> = {};
+			const { engine } = setup({ exec: countingExec(" M x\n", counts) });
+			await engine.tick();
+			await engine.refreshGitEnrichment();
+			expect(await statusCallsAt(engine, counts, 11_000)).toBe(1);
+		});
+
+		it("keeps a worktree hot while a task settled within the hour", async () => {
+			const counts: Record<string, number> = {};
+			const { engine, store } = setup({ exec: countingExec("", counts) });
+			store.create({
+				prompt: "p",
+				repo: "platform",
+				ref: "worktree:TICK-1",
+				source: "tui",
+			});
+			await engine.tick(); // resolve pass
+			await engine.tick(); // start pass
+			await engine.drain();
+			expect(store.list()[0]?.status).toBe("done");
+			await engine.refreshGitEnrichment();
+			expect(await statusCallsAt(engine, counts, 11_000)).toBe(1);
+			// Past the hot window the settle no longer counts.
+			const atColdEdge = await statusCallsAt(engine, counts, 61 * 60_000);
+			expect(atColdEdge).toBe(1); // first cold refresh is due (>5m since last)
+			expect(await statusCallsAt(engine, counts, 61 * 60_000 + 11_000)).toBe(0);
+		});
 	});
 
 	it("stamps prNumber, prUrl, and prBase when an open PR matches the worktree branch", async () => {
