@@ -28,6 +28,7 @@ import {
 	loadProjectDefaultModels,
 	loadProjectProtectedWorktrees,
 	loadProjectVars,
+	loadProjectWorktreeRetentionDays,
 	parseCron,
 	projectWorkspaceDir,
 	qooTempName,
@@ -337,6 +338,10 @@ export class Engine {
 	// the worktree-deletion sweep against a seeded-empty cache (cold start or a
 	// never-listable repo), where "worktree absent" would be a false positive.
 	private worktreeListingOk = new Set<string>();
+	/** Repos whose last `gh pr list` actually answered. A failed lookup leaves
+	 * every `prNumber` null, which is indistinguishable from "no open PR" — the
+	 * reap sweep requires this before trusting that absence. */
+	private prListingOk = new Set<string>();
 	// Git enrichment, keyed by worktree PATH, refreshed off the hot pass() path.
 	private gitEnrichCache = new Map<string, GitEnrichment>();
 	private gitEnrichFetchedAt = new Map<string, number>(); // path -> last fetch (ms)
@@ -761,6 +766,13 @@ export class Engine {
 			deps.store.purge(t.id);
 		}
 
+		// Worktree reap runs BEFORE the age purge below on purpose: it proves a
+		// worktree is queohoh's own by finding a task that targets it, and the
+		// age purge is what eventually deletes those records. Keep
+		// `worktree_retention_days` <= `purge_after_days` so the reap still sees
+		// the evidence; if the records go first the worktree is left alone.
+		await this.sweepWorktrees(now);
+
 		// Age purge: terminal tasks past purge_after_days (live or archived). A
 		// favorited row must never be silently hard-deleted by age (unlike the
 		// WORKTREE-GONE purges above, which stay unguarded by design).
@@ -925,6 +937,103 @@ export class Engine {
 		}
 	}
 
+	/**
+	 * Reap worktrees queohoh itself spawned, once their work has settled. Two
+	 * classes share one guard set:
+	 *   ephemeral — a `temp` ref's throwaway worktree (`ephemeralWorktree` on the
+	 *     task). Reaped as soon as nothing live targets it; no age gate. This is
+	 *     the flag's original intent — it was persisted and read by nobody, so
+	 *     adhoc worktrees accumulated forever.
+	 *   persistent — `{repo}.{branch}` from a pr/ticket/branch ref. Reaped only
+	 *     after `worktree_retention_days` of idleness; absent config ⇒ never.
+	 *
+	 * Guards, any one of which skips the worktree: `protected_worktrees`, a
+	 * favorite, an OPEN PR on its branch (and, for the age-gated class, gh being
+	 * able to answer at all), and an unclean — or unknown — tree.
+	 *
+	 * Provenance is the `${repo}.` prefix — the exact shape `spawnWorktree`
+	 * creates. A hand-made checkout (`platform-dns`, `platform-hotfix`) can
+	 * therefore never be reaped however old and idle it looks, and neither can a
+	 * worktree with no task record at all. That asymmetry is deliberate: the cost
+	 * of skipping a reap is disk, the cost of a wrong reap is someone's tree.
+	 *
+	 * Idleness is the NEWEST of the last commit and the last task to settle, so a
+	 * worktree committed to by hand after its task finished is not reaped out
+	 * from under that work.
+	 */
+	private async sweepWorktrees(now: number): Promise<void> {
+		const { deps } = this;
+		const byRepo = this.worktreesByRepo();
+		for (const [repo, worktrees] of Object.entries(byRepo)) {
+			// Only act on a listing we trust — the same conservatism the task
+			// purge uses. A failed/cold list must never read as "reap everything".
+			if (!this.worktreeListingOk.has(repo)) continue;
+			const retentionDays = loadProjectWorktreeRetentionDays(
+				projectWorkspaceDir(deps.config, repo),
+				deps.config.worktreeRetentionDays,
+			);
+			// One snapshot per repo rather than two store reads per worktree. Safe
+			// to reuse across the loop: only worktrees with no live task are
+			// reaped, so removeWorktree cancels nothing and purges nothing here.
+			const allTasks = [...deps.store.list(), ...deps.store.listArchived()];
+			for (const wt of worktrees) {
+				if (!wt.name.startsWith(`${repo}.`)) continue; // not ours to reap
+				if (wt.protected === true) continue;
+				if (wt.favorite === true) continue;
+				// An open PR means the branch is still in play — a review comment
+				// lands and the operator wants the tree there to answer it.
+				if (typeof wt.prNumber === "number") continue;
+				// Uncommitted work is the one thing removal destroys, so unknown
+				// (enrichment cold or git failed) blocks just like dirty.
+				if (wt.dirty !== false) continue;
+
+				const names = worktreeNameAliases(repo, wt.name, wt.name);
+				let live = false;
+				let ephemeral = false;
+				let newestSettle = 0;
+				let owned = false;
+				for (const t of allTasks) {
+					if (!taskTargetsWorktreeNames(t, repo, names)) continue;
+					owned = true;
+					if (!TERMINAL_STATUSES.has(t.status)) {
+						live = true;
+						break;
+					}
+					if (t.ephemeralWorktree) ephemeral = true;
+					const ms = Date.parse(t.finishedAt ?? t.created);
+					if (!Number.isNaN(ms) && ms > newestSettle) newestSettle = ms;
+				}
+				if (live || !owned) continue;
+
+				if (!ephemeral) {
+					if (retentionDays === null) continue;
+					// The open-PR guard above is only meaningful if gh answered;
+					// otherwise a live PR reads as no PR. Ephemeral worktrees skip
+					// this — they are throwaway by construction, and a gh-less
+					// machine must still reap them.
+					if (!this.prListingOk.has(repo)) continue;
+					const lastCommitMs = (wt.lastCommitEpoch ?? 0) * 1000;
+					const idleSince = Math.max(newestSettle, lastCommitMs);
+					// No usable timestamp at all ⇒ leave it; never reap on a guess.
+					if (idleSince === 0) continue;
+					if (idleSince >= now - retentionDays * 86_400_000) continue;
+				}
+
+				try {
+					await this.removeWorktree(repo, wt.name);
+					console.log(
+						`reaped ${ephemeral ? "ephemeral" : "idle"} worktree ${repo}/${wt.name}`,
+					);
+					deps.onChange?.();
+				} catch (err) {
+					// removeWorktree re-checks protected/favorite and can lose a race
+					// with a manual removal. A reap failure must never break the pass.
+					console.error(`worktree reap failed for ${repo}/${wt.name}:`, err);
+				}
+			}
+		}
+	}
+
 	private async refreshWorktreeCache(): Promise<void> {
 		for (const project of this.deps.config.projects) {
 			try {
@@ -988,6 +1097,11 @@ export class Engine {
 					continue; // serve last-known within TTL
 				if (prMap === undefined) {
 					prMap = repoPath === null ? null : await this.ghPrMap(repoPath);
+					// A null map means gh could not answer, which is NOT the same as
+					// "no open PRs" — every prNumber below then reads null. The reap
+					// sweep must not mistake that silence for permission.
+					if (prMap === null) this.prListingOk.delete(repo);
+					else this.prListingOk.add(repo);
 				}
 				const facts = await this.computeGitEnrichment(
 					wt.path,
