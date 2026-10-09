@@ -19,10 +19,12 @@ describe("providers config", () => {
 		// `.find(...)` results in the tests below.
 		expect(byName.claude?.enabled).toBe(false);
 		expect(byName.grok?.enabled).toBe(false);
+		expect(byName.antigravity?.enabled).toBe(false);
 		expect(byName.codex?.enabled).toBe(false);
 		expect(DEFAULT_PROVIDERS.map((p) => p.name)).toEqual([
 			"claude",
 			"grok",
+			"antigravity",
 			"codex",
 		]);
 	});
@@ -36,7 +38,12 @@ describe("providers config", () => {
 		expect(grok?.bin).toBe("grok-cli");
 		// default-only names global doesn't mention stay present (additive),
 		// appended after the global-declared order — still disabled.
-		expect(eff.map((p) => p.name)).toEqual(["grok", "claude", "codex"]);
+		expect(eff.map((p) => p.name)).toEqual([
+			"grok",
+			"claude",
+			"antigravity",
+			"codex",
+		]);
 		expect(eff.find((p) => p.name === "claude")?.enabled).toBe(false);
 		expect(eff.find((p) => p.name === "codex")?.enabled).toBe(false);
 	});
@@ -52,7 +59,12 @@ describe("providers config", () => {
 
 	it("absent global config yields the built-in defaults, all disabled", () => {
 		const eff = effectiveProviders(undefined);
-		expect(eff.map((p) => p.name)).toEqual(["claude", "grok", "codex"]);
+		expect(eff.map((p) => p.name)).toEqual([
+			"claude",
+			"grok",
+			"antigravity",
+			"codex",
+		]);
 		expect(eff.every((p) => p.enabled === false)).toBe(true);
 	});
 

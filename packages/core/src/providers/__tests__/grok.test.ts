@@ -7,6 +7,8 @@ describe("grokAdapter", () => {
 			grokAdapter.buildArgs({
 				prompt: "ignored-inline",
 				model: "grok-4.5",
+				cwd: "/wt",
+				timeoutMs: 60_000,
 				promptFilePath: "/tmp/p.grok.txt",
 			}),
 		).toEqual([
@@ -24,6 +26,8 @@ describe("grokAdapter", () => {
 			grokAdapter.buildArgs({
 				prompt: "p",
 				model: "grok-4.5",
+				cwd: "/wt",
+				timeoutMs: 60_000,
 				resumeSessionId: "gsess-1",
 				promptFilePath: "/tmp/p.grok.txt",
 			}),
@@ -44,6 +48,8 @@ describe("grokAdapter", () => {
 			grokAdapter.buildArgs({
 				prompt: "p",
 				model: "grok-4.5",
+				cwd: "/wt",
+				timeoutMs: 60_000,
 				systemPrompt: "SP",
 				promptFilePath: "/tmp/p.grok.txt",
 			}),
@@ -133,6 +139,13 @@ describe("grokAdapter", () => {
 		).toBeNull();
 	});
 	it("throws if no prompt file is provided", () => {
-		expect(() => grokAdapter.buildArgs({ prompt: "p", model: "m" })).toThrow();
+		expect(() =>
+			grokAdapter.buildArgs({
+				prompt: "p",
+				model: "m",
+				cwd: "/wt",
+				timeoutMs: 60_000,
+			}),
+		).toThrow();
 	});
 });

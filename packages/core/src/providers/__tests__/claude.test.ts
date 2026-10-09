@@ -7,6 +7,8 @@ describe("claudeAdapter", () => {
 			claudeAdapter.buildArgs({
 				prompt: "hi",
 				model: "claude-opus-5",
+				cwd: "/wt",
+				timeoutMs: 60_000,
 				resumeSessionId: "s1",
 			}),
 		).toEqual([
@@ -27,6 +29,8 @@ describe("claudeAdapter", () => {
 			claudeAdapter.buildArgs({
 				prompt: "hi",
 				model: "m",
+				cwd: "/wt",
+				timeoutMs: 60_000,
 				extraArgs: ["--foo"],
 			}),
 		).toEqual([
@@ -43,7 +47,13 @@ describe("claudeAdapter", () => {
 
 	it("appends the system prompt via --append-system-prompt before extraArgs", () => {
 		expect(
-			claudeAdapter.buildArgs({ prompt: "hi", model: "m", systemPrompt: "SP" }),
+			claudeAdapter.buildArgs({
+				prompt: "hi",
+				model: "m",
+				cwd: "/wt",
+				timeoutMs: 60_000,
+				systemPrompt: "SP",
+			}),
 		).toContain("--append-system-prompt");
 	});
 

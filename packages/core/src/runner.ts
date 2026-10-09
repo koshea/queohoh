@@ -140,6 +140,11 @@ export function executeRun(
 			...adapter.buildArgs({
 				prompt: opts.prompt,
 				model: opts.model,
+				cwd: opts.cwd,
+				// The resolved ceiling, not the raw option — an adapter that mirrors
+				// this into a CLI-side deadline must see the same number this runner
+				// will actually enforce.
+				timeoutMs,
 				resumeSessionId: opts.resumeSessionId,
 				systemPrompt: opts.systemPrompt,
 				extraArgs: opts.extraArgs,

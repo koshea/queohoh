@@ -4,7 +4,12 @@ import { codexAdapter } from "../codex.js";
 describe("codexAdapter", () => {
 	it("builds `exec --json --model <m>` argv with the prompt last", () => {
 		expect(
-			codexAdapter.buildArgs({ prompt: "do it", model: "gpt-5.6-terra" }),
+			codexAdapter.buildArgs({
+				prompt: "do it",
+				model: "gpt-5.6-terra",
+				cwd: "/wt",
+				timeoutMs: 60_000,
+			}),
 		).toEqual([
 			"exec",
 			"--json",
@@ -19,6 +24,8 @@ describe("codexAdapter", () => {
 			codexAdapter.buildArgs({
 				prompt: "p",
 				model: "m",
+				cwd: "/wt",
+				timeoutMs: 60_000,
 				resumeSessionId: "t1",
 			}),
 		).toContain("resume");
