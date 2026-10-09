@@ -136,3 +136,62 @@ describe("grokAdapter", () => {
 		expect(() => grokAdapter.buildArgs({ prompt: "p", model: "m" })).toThrow();
 	});
 });
+
+/**
+ * Out-of-budget is the most likely failure a metered CLI has, so it must be the
+ * best-covered. It was not: the exhausted-balance error below is what grok
+ * actually returns (captured live 2026-09-27), and none of the original
+ * patterns matched it — 402 is neither 401 nor 429, and the text says neither
+ * "quota" nor "subscription". `classifyUnavailable` returned null, the run was
+ * recorded as a genuine task failure, and the model chain never tried its
+ * fallback, so every task died on the first provider while a working second one
+ * sat unused.
+ */
+describe("grokAdapter.classifyUnavailable — exhausted balance", () => {
+	const LIVE_402 = [
+		"Error: Internal error: {",
+		'  "message": "API error (status 402 Payment Required): Grok Build usage balance exhausted",',
+		'  "http_status": 402',
+		"}",
+	].join("\n");
+
+	it("classifies the live 402 exhausted-balance error as unavailable", () => {
+		expect(
+			grokAdapter.classifyUnavailable({
+				exitCode: 1,
+				stderr: LIVE_402,
+				resultText: "",
+			}),
+		).toBe("provider unavailable");
+	});
+
+	it("matches on the status code, the reason phrase, and the balance wording independently", () => {
+		// Any one of these alone must be enough — the exact envelope is not a
+		// stable contract, so no single token can be load-bearing.
+		for (const text of [
+			"http_status: 402",
+			"API error (status 402 Payment Required)",
+			"Grok Build usage balance exhausted",
+			"insufficient credits",
+			"out of credits",
+		]) {
+			expect(
+				grokAdapter.classifyUnavailable({
+					exitCode: 1,
+					stderr: text,
+					resultText: "",
+				}),
+			).toBe("provider unavailable");
+		}
+	});
+
+	it("still leaves a genuine task failure unclassified", () => {
+		expect(
+			grokAdapter.classifyUnavailable({
+				exitCode: 1,
+				stderr: "tests failed: 3 assertions",
+				resultText: "I could not fix the build",
+			}),
+		).toBeNull();
+	});
+});
