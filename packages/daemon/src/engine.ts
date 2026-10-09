@@ -204,6 +204,12 @@ interface PrFacts {
  * negligible at a dozen worktrees. */
 const GIT_ENRICH_TTL_MS = 10_000;
 
+/** Backstop for a `fireCron` that never settles — see the watchdog in
+ * `evaluateCrons`. Set above `DISCOVERY_TIMEOUT_MS` (10m) so a discovery that
+ * is merely slow settles on its own and this never fires, while a genuine hang
+ * still frees the definition's cron within one 20-minute slot, not never. */
+const CRON_FIRE_WATCHDOG_MS = 12 * 60_000;
+
 /**
  * Terminal statuses — a task in one of these will never run again. Mirrors the
  * dismiss list in api.ts. Used by the worktree-deletion archive sweep.
@@ -871,7 +877,35 @@ export class Engine {
 			if (!due) continue;
 			this.cronCursor.set(key, now); // advance BEFORE the async fire (no double-fire)
 			this.cronInFlight.add(key);
-			void this.fireCron(def).finally(() => this.cronInFlight.delete(key));
+			// The in-flight guard is released by a WATCHDOG as well as by the fire
+			// itself. `fireCron` settling is the normal path, but it is not
+			// guaranteed: it shells out to operator-supplied discovery and touches
+			// git/gh, and if any of that hangs the key would stay in this set
+			// forever — silently retiring that definition's cron while every other
+			// one keeps firing. pr-hygiene died exactly this way for 12 hours, and
+			// nothing short of a daemon restart brought it back.
+			//
+			// `discoverItems` now has its own timeout, which covers the known
+			// culprit; this is the backstop that makes "a key cannot be stuck
+			// in-flight forever" true for ANY hang, including ones we have not
+			// diagnosed. Releasing early can at worst overlap two fires of the same
+			// def, which discovery dedup already absorbs — strictly better than a
+			// cron that is never heard from again.
+			const release = (): void => {
+				this.cronInFlight.delete(key);
+			};
+			const watchdog = setTimeout(() => {
+				if (!this.cronInFlight.has(key)) return;
+				console.error(
+					`cron ${key}: fire did not settle within ${Math.round(CRON_FIRE_WATCHDOG_MS / 1000)}s — releasing the in-flight guard so the schedule resumes`,
+				);
+				release();
+			}, CRON_FIRE_WATCHDOG_MS);
+			watchdog.unref();
+			void this.fireCron(def).finally(() => {
+				clearTimeout(watchdog);
+				release();
+			});
 		}
 	}
 

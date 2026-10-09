@@ -9,20 +9,34 @@ import {
 export type Exec = (
 	command: string,
 	args: string[],
-	opts: { cwd: string },
+	/** `timeoutMs` is OPTIONAL and off by default, so every existing caller keeps
+	 * waiting indefinitely exactly as before. Pass it where a hang is worse than
+	 * a failure — see `discoverItems`, where an unbounded shell-out could
+	 * permanently wedge a definition's cron. */
+	opts: { cwd: string; timeoutMs?: number },
 ) => Promise<{ stdout: string; stderr?: string; exitCode: number }>;
 
 export const defaultExec: Exec = (command, args, opts) =>
 	new Promise((resolve) => {
-		execFile(command, args, { cwd: opts.cwd }, (error, stdout, stderr) => {
-			const exitCode =
-				error && typeof error.code === "number" ? error.code : error ? 1 : 0;
-			resolve({
-				stdout: stdout ?? "",
-				stderr: stderr ?? "",
-				exitCode,
-			});
-		});
+		execFile(
+			command,
+			args,
+			// `timeout` is node's own: it signals the child and surfaces the error
+			// through this callback, so the promise ALWAYS settles. It reaches the
+			// direct child only — a grandchild (e.g. `gh` under `bash -lc`) can be
+			// orphaned rather than reaped. That is a deliberate trade: a leaked
+			// short-lived process is recoverable, a never-settling promise is not.
+			{ cwd: opts.cwd, ...(opts.timeoutMs ? { timeout: opts.timeoutMs } : {}) },
+			(error, stdout, stderr) => {
+				const exitCode =
+					error && typeof error.code === "number" ? error.code : error ? 1 : 0;
+				resolve({
+					stdout: stdout ?? "",
+					stderr: stderr ?? "",
+					exitCode,
+				});
+			},
+		);
 	});
 
 export function parseWorktreePorcelain(output: string): WorktreeInfo[] {
