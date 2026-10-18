@@ -204,6 +204,18 @@ interface PrFacts {
  * negligible at a dozen worktrees. */
 const GIT_ENRICH_TTL_MS = 10_000;
 
+/** TTL for a COLD worktree — see `isEnrichHot`. The flat 10s TTL above did not
+ * survive 200 worktrees: one serial sweep took ~38s, so every tree was stale
+ * again before it finished and git status ran back-to-back forever (a full
+ * core plus millions of stats per pass, flagged as machine-wide slowdown).
+ * Almost all of those trees sit untouched for days; 5m keeps their markers
+ * honest without paying near-live cost for them. */
+const GIT_ENRICH_COLD_TTL_MS = 5 * 60_000;
+
+/** How long after a commit or a task settling a worktree stays hot. Covers the
+ * operator picking up an agent's work (review, amend, push) right after it. */
+const GIT_ENRICH_HOT_WINDOW_MS = 60 * 60_000;
+
 /**
  * Terminal statuses — a task in one of these will never run again. Mirrors the
  * dismiss list in api.ts. Used by the worktree-deletion archive sweep.
@@ -965,6 +977,7 @@ export class Engine {
 		const now = Date.now();
 		let changed = false;
 		const live = new Set<string>();
+		const hotTargets = this.hotEnrichTargets(now);
 		for (const [repo, list] of this.worktreeCache) {
 			// Branch→PR-facts map for this repo, fetched at most ONCE per sweep
 			// (two gh calls — open + merged) and only when at least one worktree
@@ -981,11 +994,10 @@ export class Engine {
 			);
 			for (const wt of list) {
 				live.add(wt.path);
-				if (
-					now - (this.gitEnrichFetchedAt.get(wt.path) ?? 0) <
-					GIT_ENRICH_TTL_MS
-				)
-					continue; // serve last-known within TTL
+				const ttl = this.isEnrichHot(repo, wt, hotTargets, now)
+					? GIT_ENRICH_TTL_MS
+					: GIT_ENRICH_COLD_TTL_MS;
+				if (now - (this.gitEnrichFetchedAt.get(wt.path) ?? 0) < ttl) continue; // serve last-known within TTL
 				if (prMap === undefined) {
 					prMap = repoPath === null ? null : await this.ghPrMap(repoPath);
 				}
@@ -1063,6 +1075,46 @@ export class Engine {
 			}
 		}
 		if (changed) this.deps.onChange?.();
+	}
+
+	/** `${repo}\0${name}` (every alias) for worktrees a task makes hot: one not
+	 * yet terminal, or one that settled within the hot window. Live store only —
+	 * archived rows are past `archive_after_days`, far outside the window. */
+	private hotEnrichTargets(now: number): Set<string> {
+		const hot = new Set<string>();
+		for (const t of this.deps.store.list()) {
+			const wt = t.target.worktree;
+			if (wt === null || wt === REPO_SENTINEL) continue;
+			if (TERMINAL_STATUSES.has(t.status)) {
+				const ms = Date.parse(t.finishedAt ?? t.created);
+				if (Number.isNaN(ms) || now - ms >= GIT_ENRICH_HOT_WINDOW_MS) continue;
+			}
+			for (const n of worktreeNameAliases(t.target.repo, wt, wt)) {
+				hot.add(`${t.target.repo}\0${n}`);
+			}
+		}
+		return hot;
+	}
+
+	/**
+	 * Whether a worktree earns the near-live 10s TTL rather than the cold 5m one.
+	 * Hot: a task targets it (live, or settled within the hot window), it was
+	 * committed to within the window, or its last-known tree is dirty or unknown
+	 * — dirty is where the marker is actively expected to move (to clean, on
+	 * commit), and unknown means we have nothing to serve. Never-fetched trees
+	 * are refreshed regardless (fetchedAt 0 beats any TTL).
+	 */
+	private isEnrichHot(
+		repo: string,
+		wt: WorktreeInfo,
+		hotTargets: ReadonlySet<string>,
+		now: number,
+	): boolean {
+		if (hotTargets.has(`${repo}\0${wt.name}`)) return true;
+		const prev = this.gitEnrichCache.get(wt.path);
+		if (prev?.dirty !== false) return true;
+		const commitMs = (prev.lastCommitEpoch ?? 0) * 1000;
+		return now - commitMs < GIT_ENRICH_HOT_WINDOW_MS;
 	}
 
 	private async computeGitEnrichment(
