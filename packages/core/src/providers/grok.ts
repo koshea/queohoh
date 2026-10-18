@@ -13,12 +13,25 @@ import type {
 
 /** Matches quota/subscription failures from the grok CLI (rate limit, out of
  * credits, unauthorized, etc.) — these mean the provider is temporarily or
- * structurally unusable, not that the run itself failed on its merits. The
- * error wording is still unverified against a live failure, so this stays
- * permissive: a false negative just falls back to the generic `exit code N`
- * reason, never a crash. */
+ * structurally unusable, not that the run itself failed on its merits.
+ *
+ * LIVE-VERIFIED 2026-09-27. An exhausted balance surfaces as:
+ *
+ *   Error: Internal error: {
+ *     "message": "API error (status 402 Payment Required): Grok Build usage
+ *                 balance exhausted",
+ *     "http_status": 402
+ *   }
+ *
+ * None of the original patterns matched that (402 is not 401/429, and the text
+ * says neither "quota" nor "subscription"), so `classifyUnavailable` returned
+ * null, the run was recorded as a genuine task failure, and the model chain
+ * NEVER tried its fallback — every pr-hygiene task died on the first entry
+ * while a perfectly good second provider sat unused. Out-of-budget is the most
+ * likely failure a metered CLI has, so it must be the best-covered:
+ * status code, HTTP reason phrase, and the balance wording all match. */
 const UNAVAILABLE_RE =
-	/\b401\b|\b429\b|unauthorized|unauthenticated|invalid api key|rate limit|quota|subscription|too many requests/i;
+	/\b401\b|\b402\b|\b429\b|payment required|balance exhausted|usage balance|insufficient (?:credit|balance|funds)|out of credits?|unauthorized|unauthenticated|invalid api key|rate limit|quota|subscription|too many requests/i;
 
 export const grokAdapter: ProviderAdapter = {
 	name: "grok",
