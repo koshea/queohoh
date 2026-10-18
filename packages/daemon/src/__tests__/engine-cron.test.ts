@@ -219,6 +219,39 @@ describe("Engine cron watchdog", () => {
 		return { config };
 	}
 
+	it("an expired fire must not release its replacement's guard", async () => {
+		const { config } = workspaceWithDiscovery("* * * * *");
+		let clock = at(2026, 7, 14, 15, 19);
+		const finish: Array<() => void> = [];
+		const hangingExec: Exec = async (command) => {
+			if (command !== "/bin/bash") return { stdout: "", exitCode: 0 };
+			return new Promise((resolve) => {
+				finish.push(() => resolve({ stdout: "[]", exitCode: 0 }));
+			});
+		};
+		const { engine } = engineWith(config, () => clock, undefined, hangingExec);
+		vi.useFakeTimers();
+		try {
+			await engine.tick(); // seed at 15:19
+			clock = at(2026, 7, 14, 15, 20);
+			await engine.tick(); // first fire hangs
+			expect(finish).toHaveLength(1);
+			await vi.advanceTimersByTimeAsync(13 * 60_000);
+			clock = at(2026, 7, 14, 15, 33);
+			await engine.tick(); // watchdog permits a replacement
+			expect(finish).toHaveLength(2);
+			finish[0]?.(); // old fire finally settles while replacement is pending
+			await vi.advanceTimersByTimeAsync(60_000);
+			clock = at(2026, 7, 14, 15, 34);
+			await engine.tick();
+			expect(finish).toHaveLength(2);
+		} finally {
+			for (const resolve of finish) resolve();
+			await vi.advanceTimersByTimeAsync(0);
+			vi.useRealTimers();
+		}
+	});
+
 	it("releases the in-flight guard so a later slot still fires after a hung discovery", async () => {
 		const { config } = workspaceWithDiscovery("*/20 * * * *");
 		let clock = at(2026, 7, 14, 15, 19);

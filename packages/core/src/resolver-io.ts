@@ -5,6 +5,7 @@ import {
 	type ResolverIO,
 	type WorktreeInfo,
 } from "./resolver.js";
+import { executeBoundedCommand } from "./runner.js";
 
 export type Exec = (
 	command: string,
@@ -16,28 +17,25 @@ export type Exec = (
 	opts: { cwd: string; timeoutMs?: number },
 ) => Promise<{ stdout: string; stderr?: string; exitCode: number }>;
 
-export const defaultExec: Exec = (command, args, opts) =>
-	new Promise((resolve) => {
-		execFile(
-			command,
-			args,
-			// `timeout` is node's own: it signals the child and surfaces the error
-			// through this callback, so the promise ALWAYS settles. It reaches the
-			// direct child only — a grandchild (e.g. `gh` under `bash -lc`) can be
-			// orphaned rather than reaped. That is a deliberate trade: a leaked
-			// short-lived process is recoverable, a never-settling promise is not.
-			{ cwd: opts.cwd, ...(opts.timeoutMs ? { timeout: opts.timeoutMs } : {}) },
-			(error, stdout, stderr) => {
-				const exitCode =
-					error && typeof error.code === "number" ? error.code : error ? 1 : 0;
-				resolve({
-					stdout: stdout ?? "",
-					stderr: stderr ?? "",
-					exitCode,
-				});
-			},
-		);
+export const defaultExec: Exec = (command, args, opts) => {
+	if (opts.timeoutMs !== undefined && opts.timeoutMs > 0) {
+		return executeBoundedCommand(command, args, {
+			cwd: opts.cwd,
+			timeoutMs: opts.timeoutMs,
+		});
+	}
+	return new Promise((resolve) => {
+		execFile(command, args, { cwd: opts.cwd }, (error, stdout, stderr) => {
+			const exitCode =
+				error && typeof error.code === "number" ? error.code : error ? 1 : 0;
+			resolve({
+				stdout: stdout ?? "",
+				stderr: stderr ?? "",
+				exitCode,
+			});
+		});
 	});
+};
 
 export function parseWorktreePorcelain(output: string): WorktreeInfo[] {
 	const result: WorktreeInfo[] = [];
