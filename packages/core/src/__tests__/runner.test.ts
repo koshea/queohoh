@@ -221,6 +221,8 @@ describe("executeClaude", () => {
 		});
 		expect(result.exitCode).toBe(1);
 		expect(result.stderr).toContain("Failed to spawn");
+		expect(result.stderr).toContain("ENOENT");
+		expect(result.stderr).toContain("/nonexistent/claude-bin");
 	});
 });
 
