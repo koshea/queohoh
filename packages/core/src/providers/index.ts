@@ -23,15 +23,18 @@ export {
 } from "./usage-grok.js";
 export { getUsageProbe } from "./usage-registry.js";
 
+import { antigravityAdapter } from "./antigravity.js";
 import { claudeAdapter } from "./claude.js";
 import { codexAdapter } from "./codex.js";
 import { grokAdapter } from "./grok.js";
 import { registerAdapter } from "./registry.js";
 
+export { antigravityAdapter } from "./antigravity.js";
 export { claudeAdapter } from "./claude.js";
 export { codexAdapter } from "./codex.js";
 export { grokAdapter } from "./grok.js";
 
 registerAdapter(claudeAdapter);
+registerAdapter(antigravityAdapter);
 registerAdapter(codexAdapter);
 registerAdapter(grokAdapter);

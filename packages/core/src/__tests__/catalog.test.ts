@@ -12,8 +12,13 @@ import {
 } from "../catalog.js";
 
 describe("PROVIDER_PRECEDENCE", () => {
-	it("is claude, grok, codex in order", () => {
-		expect(PROVIDER_PRECEDENCE).toEqual(["claude", "grok", "codex"]);
+	it("is claude, grok, antigravity, codex in order", () => {
+		expect(PROVIDER_PRECEDENCE).toEqual([
+			"claude",
+			"grok",
+			"antigravity",
+			"codex",
+		]);
 	});
 });
 
@@ -47,6 +52,51 @@ describe("BUILTIN_CATALOG", () => {
 				provider: "grok",
 				id: "grok-composer-2.5-fast",
 				label: "grok-composer-2.5-fast",
+				hidden: true,
+			},
+			{
+				provider: "antigravity",
+				id: "gemini-3.8-flash-high",
+				label: "gemini-3.8-flash-high",
+			},
+			{
+				provider: "antigravity",
+				id: "gemini-3.1-pro-high",
+				label: "gemini-3.1-pro-high",
+			},
+			{
+				provider: "antigravity",
+				id: "claude-opus-4-6-thinking",
+				label: "claude-opus-4-6-thinking",
+			},
+			{
+				provider: "antigravity",
+				id: "gemini-3.8-flash-medium",
+				label: "gemini-3.8-flash-medium",
+				hidden: true,
+			},
+			{
+				provider: "antigravity",
+				id: "gemini-3.8-flash-low",
+				label: "gemini-3.8-flash-low",
+				hidden: true,
+			},
+			{
+				provider: "antigravity",
+				id: "gemini-3.1-pro-low",
+				label: "gemini-3.1-pro-low",
+				hidden: true,
+			},
+			{
+				provider: "antigravity",
+				id: "claude-sonnet-4-6",
+				label: "claude-sonnet-4-6",
+				hidden: true,
+			},
+			{
+				provider: "antigravity",
+				id: "gpt-oss-120b-medium",
+				label: "gpt-oss-120b-medium",
 				hidden: true,
 			},
 			{ provider: "codex", id: "gpt-5.6-sol", label: "gpt-5.6-sol" },
@@ -135,8 +185,13 @@ describe("effectiveCatalog", () => {
 			const span = providers.slice(first, last + 1);
 			expect(span.every((x) => x === p)).toBe(true);
 		}
-		// Groups appear in precedence order: claude, grok, codex.
-		expect([...new Set(providers)]).toEqual(["claude", "grok", "codex"]);
+		// Groups appear in precedence order: claude, grok, antigravity, codex.
+		expect([...new Set(providers)]).toEqual([
+			"claude",
+			"grok",
+			"antigravity",
+			"codex",
+		]);
 	});
 
 	it("puts an overlay entry with an unknown provider into a trailing group after precedence", () => {
@@ -150,7 +205,13 @@ describe("effectiveCatalog", () => {
 			label: "large",
 		});
 		const providers = [...new Set(result.map((e) => e.provider))];
-		expect(providers).toEqual(["claude", "grok", "codex", "mistral"]);
+		expect(providers).toEqual([
+			"claude",
+			"grok",
+			"antigravity",
+			"codex",
+			"mistral",
+		]);
 	});
 
 	it("errors on a duplicate label within one provider", () => {

@@ -47,8 +47,21 @@ providers:
   - name: claude
   # - name: grok
   #   bin: /path/to/grok   # optional pin when the CLI is not on PATH
+  # - name: antigravity    # the `agy` CLI
   # - name: codex
 ```
+
+Supported providers: `claude`, `grok`, `antigravity`, `codex`. `antigravity`
+runs Google's `agy` CLI and is useful as a fallback because its fleet
+(`antigravity/gemini-3.8-flash-high`, `antigravity/claude-opus-4-6-thinking`, …)
+bills against a different budget than the `claude`/`grok` CLIs — so a task can
+keep running when those are out of credit. Two things differ from the other
+providers and are handled by the adapter, not by you: the CLI ignores the
+process cwd (queohoh passes the worktree as `--add-dir`), and its print mode
+defaults to a 5-minute cap (queohoh passes the task's real `timeout:`). It has
+no `--append-system-prompt` equivalent, so a provider `system_prompt:` is
+prepended to the prompt body. MCP servers are configured per-CLI, so anything a
+task needs (Notion, Linear, …) must also be added with `agy mcp add`.
 
 Task definitions live in the workspace, one directory per project: `$QUEOHOH_WORKSPACE/<project>/tasks/<name>/` (`config.yaml` + `prompt.md`). An optional `$QUEOHOH_WORKSPACE/<project>/vars.yaml` supplies per-project template vars.
 
@@ -56,7 +69,7 @@ Task lifecycle (live → archive → purge, `on_done`, worktree teardown) is doc
 
 `vars.yaml` also holds two reserved keys that are read as settings rather than exposed as `{{var}}` placeholders:
 
-- `default_models:` — an ordered fallback list of `provider/label` model refs (e.g. `[claude/claude-opus-4.8, grok/grok-4.5]`) that overrides the global `default_models:` for this project's tasks/defs that don't set their own `model:`.
+- `default_models:` — an ordered fallback list of `provider/label` model refs (e.g. `[claude/claude-opus-4.8, grok/grok-4.7, antigravity/gemini-3.8-flash-high]`) that overrides the global `default_models:` for this project's tasks/defs that don't set their own `model:`.
 - `github_id:` — your author identity, e.g. `github_id: alice`. The TUI uses it to sort your own worktrees first. A worktree counts as **yours** when `github_id` is a case-insensitive **substring of the last-commit author email**, OR a case-insensitive **substring of the author name**. So pick a value that appears in the email or name of the commits you author — e.g. the login embedded in a GitHub noreply email (`12345+alice@users.noreply.github.com` → `alice`), or a distinctive token of your name/email if you commit as `Alice Example <alice@example.com>` (here `alice` matches the email, `Alice` or `Example` matches the name; your work GitHub login would match neither). Optional and parsed leniently — an absent, empty, or non-string value simply disables the "mine-first" sort.
 
 ### Builtin vars
@@ -155,7 +168,8 @@ loginctl enable-linger "$USER"
 The daemon exposes an MCP server over stdio (`queohoh mcp` / `node packages/daemon/dist/cli.js mcp`) with `enqueue_task`, `enqueue_chain`, `list_tasks`, `list_task_definitions`, and `run_task_definition`. Register it once per agent CLI you use:
 
 ```bash
-# One-shot: every supported CLI present on PATH (Claude Code, Codex, Grok Build)
+# One-shot: every supported CLI present on PATH
+# (Claude Code, Codex, Grok Build, Antigravity)
 mise run mcp:register
 
 # Or a subset:
@@ -169,6 +183,7 @@ Equivalent manual commands (user scope where the CLI has one):
 claude mcp add --scope user queohoh -- "$(command -v node)" /path/to/queohoh/packages/daemon/dist/cli.js mcp
 codex  mcp add             queohoh -- "$(command -v node)" /path/to/queohoh/packages/daemon/dist/cli.js mcp
 grok   mcp add --scope user queohoh -- "$(command -v node)" /path/to/queohoh/packages/daemon/dist/cli.js mcp
+agy    mcp add             queohoh -- "$(command -v node)" /path/to/queohoh/packages/daemon/dist/cli.js mcp
 ```
 
 `scripts/mcp-register.sh` is idempotent (remove-then-add) and skips missing CLIs with a warning.

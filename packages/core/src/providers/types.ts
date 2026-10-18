@@ -24,6 +24,19 @@ export interface ParsedEvent {
 export interface BuildArgsInput {
 	prompt: string;
 	model: string;
+	/** The run's working directory. Required (the runner always has one) rather
+	 * than optional so a new adapter cannot silently omit it: antigravity IGNORES
+	 * the process cwd and needs it passed as an explicit `--add-dir` workspace,
+	 * or the agent operates on the CLI's own scratch project instead of the
+	 * task's worktree. Adapters that inherit cwd from the spawn (claude, grok,
+	 * codex) ignore this. */
+	cwd: string;
+	/** The run's wall-clock ceiling, mirrored from the runner's `timeoutMs`.
+	 * Required for the same reason as `cwd`: antigravity's print mode defaults to
+	 * a 5-minute timeout and must be told the real budget, or every long task is
+	 * truncated. Adapters with no CLI-side deadline ignore this — queohoh's own
+	 * reapers remain the authority either way. */
+	timeoutMs: number;
 	resumeSessionId?: string;
 	systemPrompt?: string;
 	extraArgs?: string[];

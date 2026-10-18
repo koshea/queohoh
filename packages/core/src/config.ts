@@ -37,7 +37,7 @@ export interface ProviderConfig {
 }
 
 /** Built-in provider table: known names in fallback precedence order
- * (claude → grok → codex), every entry **disabled** until the operator opts
+ * (claude → grok → antigravity → codex), every entry **disabled** until the operator opts
  * in via config.yaml `providers:`. Listing a name without `enabled:` opts it
  * in (schema default `true`); unmentioned built-ins stay off. This is the
  * base every `effectiveProviders` call layers onto — absent `providers:` in
@@ -45,6 +45,7 @@ export interface ProviderConfig {
 export const DEFAULT_PROVIDERS: ProviderConfig[] = [
 	{ name: "claude", enabled: false },
 	{ name: "grok", enabled: false },
+	{ name: "antigravity", enabled: false },
 	{ name: "codex", enabled: false },
 ];
 

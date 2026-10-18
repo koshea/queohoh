@@ -5,8 +5,10 @@
 #   scripts/mcp-register.sh              # every supported CLI present on PATH
 #   scripts/mcp-register.sh claude       # only Claude Code
 #   scripts/mcp-register.sh codex grok   # Codex + Grok Build
+#   scripts/mcp-register.sh agy          # only Antigravity
 #
-# Supported agents: claude, codex, grok. Missing CLIs are skipped with a
+# Supported agents: claude, codex, grok, agy (Antigravity — keyed by its CLI
+# name, since that is what must be on PATH). Missing CLIs are skipped with a
 # warning; exit 1 only when none of the requested agents could be registered
 # (or when node / the daemon CLI is missing).
 set -euo pipefail
@@ -50,7 +52,7 @@ echo "shim: $SHIM → node $CLI"
 
 # Default: all supported agents. Positional args filter to a subset.
 if [ "$#" -eq 0 ]; then
-	AGENTS=(claude codex grok)
+	AGENTS=(claude codex grok agy)
 else
 	AGENTS=("$@")
 fi
@@ -80,11 +82,20 @@ register_grok() {
 	grok mcp add --scope user "$NAME" -- "$SHIM" mcp
 }
 
+register_agy() {
+	# Antigravity's `mcp add` is "add or update", and it has NO --scope flag
+	# (config is per-user already). `--` is required before the command so the
+	# shim path is not parsed as a flag. Remove first for the same
+	# stale-path reason as grok.
+	agy mcp remove "$NAME" >/dev/null 2>&1 || true
+	agy mcp add "$NAME" -- "$SHIM" mcp
+}
+
 for agent in "${AGENTS[@]}"; do
 	case "$agent" in
-	claude | codex | grok) ;;
+	claude | codex | grok | agy) ;;
 	*)
-		echo "unknown agent: $agent (want claude|codex|grok)" >&2
+		echo "unknown agent: $agent (want claude|codex|grok|agy)" >&2
 		failed=$((failed + 1))
 		continue
 		;;

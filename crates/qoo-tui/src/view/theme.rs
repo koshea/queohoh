@@ -414,6 +414,13 @@ impl Palette {
     /// grok share the same green (`mauve` — the grok chip color) so provider
     /// identity reads as one family rather than blue-vs-green rivalry; codex
     /// keeps teal; unknown names fall back to metadata.
+    ///
+    /// antigravity deliberately takes that metadata fallback rather than a
+    /// dedicated arm: the remaining palette slots all carry a meaning elsewhere
+    /// (`accent` is the generic UI accent — selection bar, focused borders,
+    /// tabs — and `ok`/`warn` are outcome colors), and reusing one here would
+    /// break the rule that a concept keeps one color across the UI. Grey reads
+    /// fine; give it a real color only by adding a palette field.
     pub fn provider_style(&self, name: &str) -> Style {
         let color = match name {
             "claude" | "grok" => self.mauve,

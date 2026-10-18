@@ -1,8 +1,9 @@
 /**
  * Model catalog (design spec Section 1). One flat, provider-grouped list of
  * concrete models replaces the old per-provider tier tables: providers
- * appear in fixed precedence order (claude -> grok -> codex), and each
- * provider's entries are ordered most->least powerful within the group.
+ * appear in fixed precedence order (claude -> grok -> antigravity -> codex),
+ * and each provider's entries are ordered most->least powerful within the
+ * group.
  *
  * `models.ts` builds per-task chains on top of this; `config.ts` layers a
  * `catalog:` overlay on top of `BUILTIN_CATALOG` via `effectiveCatalog`.
@@ -22,8 +23,15 @@ export interface CatalogEntry {
 	hidden?: boolean;
 }
 
-/** Fixed provider group order every catalog is re-grouped into. */
-export const PROVIDER_PRECEDENCE: string[] = ["claude", "grok", "codex"];
+/** Fixed provider group order every catalog is re-grouped into. antigravity
+ * sits after grok: it is the stand-in when the metered providers are out of
+ * budget, so it should surface above codex in every picker. */
+export const PROVIDER_PRECEDENCE: string[] = [
+	"claude",
+	"grok",
+	"antigravity",
+	"codex",
+];
 
 /** Shipped defaults (design spec Section 1). Grouped by
  * `PROVIDER_PRECEDENCE`; each group ordered most->least powerful.
@@ -61,6 +69,66 @@ export const BUILTIN_CATALOG: CatalogEntry[] = [
 		provider: "grok",
 		id: "grok-composer-2.5-fast",
 		label: "grok-composer-2.5-fast",
+		hidden: true,
+	},
+	// antigravity (the `agy` CLI) fronts Google's Antigravity fleet, which
+	// includes third-party models on Google's quota — so `antigravity/claude-*`
+	// is a genuinely different budget from the `claude` provider's own CLI, and
+	// is the reason this provider is useful when Anthropic/xAI credit runs dry.
+	// Labels are the CLI's own ids verbatim (`agy models`): they already carry
+	// family + version + reasoning effort, so no separate alias is needed.
+	//
+	// Group head is 3.8-flash, NOT 3.1-pro: across that seven-generation gap the
+	// newer Flash is the stronger default, and `agy models` lists the 3.8 flash
+	// variants above 3.1-pro in its own ordering. Flash is also far cheaper on
+	// the shared Google quota, which matters because this provider exists to
+	// keep half-hourly cron jobs running when the metered providers are dry.
+	// 3.1-pro stays visible as the heavier option for reasoning-bound work.
+	{
+		provider: "antigravity",
+		id: "gemini-3.8-flash-high",
+		label: "gemini-3.8-flash-high",
+	},
+	{
+		provider: "antigravity",
+		id: "gemini-3.1-pro-high",
+		label: "gemini-3.1-pro-high",
+	},
+	{
+		provider: "antigravity",
+		id: "claude-opus-4-6-thinking",
+		label: "claude-opus-4-6-thinking",
+	},
+	// Hidden from pickers (the group offers the three above) but still
+	// resolvable when referenced explicitly — `hidden` is picker-only.
+	{
+		provider: "antigravity",
+		id: "gemini-3.8-flash-medium",
+		label: "gemini-3.8-flash-medium",
+		hidden: true,
+	},
+	{
+		provider: "antigravity",
+		id: "gemini-3.8-flash-low",
+		label: "gemini-3.8-flash-low",
+		hidden: true,
+	},
+	{
+		provider: "antigravity",
+		id: "gemini-3.1-pro-low",
+		label: "gemini-3.1-pro-low",
+		hidden: true,
+	},
+	{
+		provider: "antigravity",
+		id: "claude-sonnet-4-6",
+		label: "claude-sonnet-4-6",
+		hidden: true,
+	},
+	{
+		provider: "antigravity",
+		id: "gpt-oss-120b-medium",
+		label: "gpt-oss-120b-medium",
 		hidden: true,
 	},
 	{ provider: "codex", id: "gpt-5.6-sol", label: "gpt-5.6-sol" },
