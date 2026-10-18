@@ -227,7 +227,10 @@ describe("createResolverIO", () => {
 		});
 		expect(records).toEqual([
 			{ key: "git reset --hard HEAD", cwd: "/wt/TICK-77" },
-			{ key: "git clean -fd", cwd: "/wt/TICK-77" },
+			// -fdx, not -fd: the ignored artifacts (a ~1.5G pnpm store) are the
+			// bulk that made wt's background delete interruptible. See
+			// resolver-io-remove.test.ts for the full removal contract.
+			{ key: "git clean -fdx", cwd: "/wt/TICK-77" },
 			{ key: "wt remove --yes TICK-77-fix", cwd: "/repo" },
 			{ key: "git branch -D TICK-77-fix", cwd: "/repo" },
 		]);
