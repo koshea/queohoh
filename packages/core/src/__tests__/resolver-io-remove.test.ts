@@ -7,20 +7,8 @@ import {
 	type ResolverFs,
 } from "../resolver-io.js";
 
-/**
- * Removal contract for the `wt` integration.
- *
- * `wt remove` deletes in the BACKGROUND and exits 0 once that is under way, so
- * exit 0 is not proof the path is free. On wt < 0.79 the delete happened in
- * place, so an interrupted pass left ~37G of husks here — directories that were
- * no longer worktrees, holding only the ignored `node_modules/.pnpm`, which
- * `wt switch` then refused forever with "Directory already exists".
- *
- * wt >= 0.79 renames the tree aside first, so the path is released before the
- * command returns and the settle below is a single `stat`. These tests pin the
- * behaviour that keeps us correct on EITHER version — the daemon must never
- * treat exit 0 as proof, and must never delete a path git still owns.
- */
+/** Provider exit 0 is not proof the original path is gone. Wait for deletion,
+ * then require manual inspection of any leftover; never recursively clear it. */
 
 const wt: WorktreeInfo = {
 	name: "platform.feature-x",
@@ -63,16 +51,15 @@ function scriptedFs(trueFor: number): ResolverFs & { removed: string[] } {
 const fast = { settleAttempts: 3, settleIntervalMs: 1 };
 
 describe("removeWorktree", () => {
-	it("clears IGNORED artifacts too (-fdx), not just -fd", async () => {
-		// node_modules/.pnpm is gitignored and ~1.5G; leaving it is what made the
-		// background delete slow enough to be interruptible.
+	it("does not pre-clean ignored data before a removal that could fail", async () => {
+		// Explicit cleanup must not broaden to ignored data as a preparatory step.
 		const { exec, calls } = recordingExec();
 		await createResolverIO(exec, scriptedFs(0), fast).removeWorktree(
 			"/repo",
 			wt,
 		);
 		const clean = calls.find((c) => c[0] === "git" && c[1] === "clean");
-		expect(clean).toEqual(["git", "clean", "-fdx"]);
+		expect(clean).toEqual(["git", "clean", "-fd"]);
 	});
 
 	it("returns as soon as the tree is actually gone, without forcing", async () => {
@@ -90,15 +77,16 @@ describe("removeWorktree", () => {
 		expect(fs.removed).toEqual([]);
 	});
 
-	it("finishes the removal itself when the background delete never lands", async () => {
-		// The husk case. Worktree list no longer mentions the path, so git has
-		// let go and what remains is leftovers, safe to delete.
+	it("preserves unregistered leftovers when the background delete never lands", async () => {
+		// Missing registration cannot prove this path is still provider output.
 		const { exec } = recordingExec(
 			"worktree /repo\nHEAD abc\nbranch refs/heads/main\n",
 		);
 		const fs = scriptedFs(99); // never disappears
-		await createResolverIO(exec, fs, fast).removeWorktree("/repo", wt);
-		expect(fs.removed).toEqual(["/wt/platform.feature-x"]);
+		await expect(
+			createResolverIO(exec, fs, fast).removeWorktree("/repo", wt),
+		).rejects.toThrow(/manual inspection/);
+		expect(fs.removed).toEqual([]);
 	});
 
 	it("refuses to delete a path git still lists as a worktree", async () => {
@@ -140,15 +128,8 @@ describe("removeWorktree", () => {
 	});
 });
 
-/**
- * Spawn-side self-heal. A husk at the target path makes wt refuse outright
- * ("✗ Directory already exists: <path>"), and since nothing cleared it, every
- * later run on that branch failed identically — the branch was permanently
- * unrunnable. Both removal paths measured clean, so rather than keep hunting
- * the producer, spawn recovers: clear a directory git demonstrably does not own
- * (unregistered AND no `.git`), then retry once.
- */
-describe("spawnWorktree husk recovery", () => {
+/** A failed provider command must never authorize deletion of its error path. */
+describe("spawnWorktree leftover safety", () => {
 	const HUSK = "/wt/platform.feature-x";
 	const REFUSAL = `✗ Directory already exists: ${HUSK}`;
 	const LISTING = (withWt: boolean) =>
@@ -175,26 +156,29 @@ describe("spawnWorktree husk recovery", () => {
 		return { exec, calls };
 	}
 
-	it("clears the husk and retries, turning a wedged branch into a working spawn", async () => {
+	it("preserves an unregistered directory rather than guessing it is a husk", async () => {
 		const state = { present: true };
 		const { exec, calls } = healingExec(state);
+		const removed: string[] = [];
 		const fsio: ResolverFs = {
 			async exists(p) {
-				return p === HUSK ? state.present : false; // no .git inside
+				return p === HUSK && state.present;
 			},
-			async remove() {
+			async remove(p) {
+				removed.push(p);
 				state.present = false;
 			},
 		};
-		const io = createResolverIO(exec, fsio, fast);
-		const spawned = await io.spawnWorktree(
-			"/repo",
-			"platform.feature-x",
-			"feature/x",
-		);
-		expect(spawned.path).toBe(HUSK);
-		// It retried the switch rather than giving up after clearing.
-		expect(calls.filter((c) => c.startsWith("wt switch")).length).toBe(2);
+		await expect(
+			createResolverIO(exec, fsio, fast).spawnWorktree(
+				"/repo",
+				"platform.feature-x",
+				"feature/x",
+			),
+		).rejects.toThrow(/failed to spawn worktree/);
+		expect(state.present).toBe(true);
+		expect(removed).toEqual([]);
+		expect(calls.filter((c) => c.startsWith("wt switch"))).toHaveLength(1);
 	});
 
 	it("never deletes a path that still has a .git (a live worktree)", async () => {
@@ -268,5 +252,15 @@ describe("parseExistingDirPath", () => {
 	it("returns null for any other failure, so no path is ever guessed", () => {
 		expect(parseExistingDirPath("✗ mise sync failed", "/home/k")).toBeNull();
 		expect(parseExistingDirPath("", "/home/k")).toBeNull();
+	});
+
+	it.each([
+		"✗ Directory already exists: relative/path",
+		"✗ Directory already exists: /tmp/../valuable",
+		"✗ Directory already exists: /tmp/valuable\u001b[0m",
+		"✗ Directory already exists: /tmp/valuable\nwrapped-path",
+		"✗ Directory already exists: /tmp/first\n✗ Directory already exists: /tmp/second",
+	])("refuses ambiguous or malformed diagnostic %j", (output) => {
+		expect(parseExistingDirPath(output)).toBeNull();
 	});
 });

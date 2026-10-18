@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { rm, stat } from "node:fs/promises";
+import { lstat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename } from "node:path";
 import {
@@ -12,10 +12,7 @@ import { executeBoundedCommand } from "./runner.js";
 export type Exec = (
 	command: string,
 	args: string[],
-	/** `timeoutMs` is OPTIONAL and off by default, so every existing caller keeps
-	 * waiting indefinitely exactly as before. Pass it where a hang is worse than
-	 * a failure — see `discoverItems`, where an unbounded shell-out could
-	 * permanently wedge a definition's cron. */
+	/** Opt-in hard deadline for shell-outs such as discovery; omitted means no limit. */
 	opts: { cwd: string; timeoutMs?: number },
 ) => Promise<{ stdout: string; stderr?: string; exitCode: number }>;
 
@@ -45,23 +42,23 @@ export const defaultExec: Exec = (command, args, opts) => {
  */
 export interface ResolverFs {
 	exists(path: string): Promise<boolean>;
-	remove(path: string): Promise<void>;
+	/** Legacy injection seam; recursive recovery is intentionally never called. */
+	remove?(path: string): Promise<void>;
 }
 
 export const defaultResolverFs: ResolverFs = {
 	async exists(path) {
 		try {
-			await stat(path);
+			await lstat(path);
 			return true;
 		} catch {
 			return false;
 		}
 	},
-	remove: (path) => rm(path, { recursive: true, force: true }),
 };
 
-/** How long to wait for the worktree path to actually be free before finishing
- * the job ourselves: 60 × 250ms = 15s. Bounded because a hung delete must not
+/** How long to wait for the worktree path to actually be free before reporting
+ * that manual inspection is required: 60 × 250ms = 15s. Bounded because a hung delete must not
  * stall the engine pass that is reaping.
  *
  * On wt >= 0.79 this costs one `stat` and returns immediately (see
@@ -87,13 +84,21 @@ export function parseExistingDirPath(
 	output: string,
 	home: string = homedir(),
 ): string | null {
-	const match = /Directory already exists:\s*(\S+)/.exec(output);
-	if (!match) return null;
-	const raw = match[1];
-	if (raw === undefined || raw.length === 0) return null;
-	if (raw === "~") return home;
-	if (raw.startsWith("~/")) return `${home}/${raw.slice(2)}`;
-	return raw;
+	// A diagnostic spanning lines cannot distinguish a newline in a filename
+	// from unrelated output. Refuse it rather than truncate the candidate.
+	const line = output.endsWith("\n") ? output.slice(0, -1) : output;
+	if (
+		[...line].some(
+			(char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127,
+		)
+	)
+		return null;
+	const match = /^(?:✗ )?Directory already exists: (.+)$/.exec(line);
+	const raw = match?.[1];
+	if (!raw || raw.trim() !== raw) return null;
+	if (!raw.startsWith("/") && !raw.startsWith("~/")) return null;
+	if (raw.split("/").some((part) => part === "." || part === "..")) return null;
+	return raw.startsWith("~/") ? `${home}/${raw.slice(2)}` : raw;
 }
 
 export function parseWorktreePorcelain(output: string): WorktreeInfo[] {
@@ -147,16 +152,9 @@ export function createResolverIO(
 		return parseWorktreePorcelain(stdout);
 	}
 
-	/**
-	 * Wait for `wt remove`'s background delete to land, and finish it if it
-	 * doesn't. Returns once `path` is gone.
-	 *
-	 * The forced removal is gated on the path no longer being a REGISTERED
-	 * worktree: that is what proves git has let go of it and we are deleting a
-	 * husk rather than racing a live checkout. If it is somehow still registered
-	 * after `wt remove` returned 0, that is a contract violation worth surfacing,
-	 * not something to paper over with a delete.
-	 */
+	/** Wait for the provider's background delete, but never take over deletion.
+	 * An unregistered leftover might have been replaced by user data while we
+	 * waited. Provider success alone cannot establish ownership of that path. */
 	async function settleRemoval(path: string, repoPath: string): Promise<void> {
 		for (let i = 0; i < settleAttempts; i++) {
 			if (!(await fsio.exists(path))) return;
@@ -178,7 +176,9 @@ export function createResolverIO(
 				`worktree ${path} still registered after wt remove reported success`,
 			);
 		}
-		await fsio.remove(path);
+		throw new Error(
+			`worktree path ${path} remains after wt remove; manual inspection required`,
+		);
 	}
 
 	return {
@@ -223,7 +223,7 @@ export function createResolverIO(
 				: (["switch", "--yes", "--no-cd", "-c", name] as string[]);
 			let result = await exec("wt", createArgs, { cwd: repoPath });
 			let detail = [result.stderr, result.stdout]
-				.filter((s) => s && s.trim())
+				.filter((s) => s?.trim())
 				.join("\n")
 				.trim();
 
@@ -231,22 +231,18 @@ export function createResolverIO(
 			// branch on disk. wt then prints "Branch X already exists" and
 			// exits non-zero — open the existing branch without -c.
 			if (result.exitCode !== 0 && !branch) {
-				const reopen = await exec(
-					"wt",
-					["switch", "--yes", "--no-cd", name],
-					{ cwd: repoPath },
-				);
+				const reopen = await exec("wt", ["switch", "--yes", "--no-cd", name], {
+					cwd: repoPath,
+				});
 				const reopenDetail = [reopen.stderr, reopen.stdout]
-					.filter((s) => s && s.trim())
+					.filter((s) => s?.trim())
 					.join("\n")
 					.trim();
 				if (reopen.exitCode === 0) {
 					result = reopen;
 					detail = reopenDetail;
 				} else if (reopenDetail) {
-					detail = detail
-						? `${detail}\n${reopenDetail}`
-						: reopenDetail;
+					detail = detail ? `${detail}\n${reopenDetail}` : reopenDetail;
 				}
 			}
 
@@ -254,46 +250,12 @@ export function createResolverIO(
 			// worktree directory exists (mise sync / docker-setup). Adopt it so
 			// the task runs instead of failing with a generic spawn error while
 			// leaving an orphan worktree the ticket matcher used to miss.
-			let after = await listWorktrees(repoPath);
-			let spawned = findWorktree(after, name, branch);
+			const after = await listWorktrees(repoPath);
+			const spawned = findWorktree(after, name, branch);
 			if (spawned) return spawned;
 
-			// Self-heal a HUSK: a directory at the target path that git does not
-			// own (no registration, no `.git`). wt refuses such a path outright
-			// ("✗ Directory already exists: <path>"), and because nothing ever
-			// cleared it, EVERY later run on that branch failed the same way —
-			// pr-hygiene sat wedged for days this way, and ~37G accumulated.
-			//
-			// Deliberately not diagnosing WHO leaves the husk: both removal paths
-			// were measured clean (`git worktree remove --force` deletes 1.36G
-			// synchronously; wt >= 0.79 frees the path before returning), yet husks
-			// still appear after a failed spawn — most likely a partial rollback
-			// when wt's post-create hooks fail under the daemon's non-TTY env.
-			// Whoever the producer is, recovery is the same and belongs here:
-			// a branch must not be permanently unrunnable because of leftovers.
-			//
-			// The path comes from wt's own message rather than being reconstructed,
-			// since worktree layout is configurable (`wt config create`). The gate
-			// stays the one used everywhere else — unregistered AND no `.git` — so
-			// a live checkout can never be deleted.
-			const huskPath = parseExistingDirPath(detail);
-			if (huskPath !== null && !after.some((wt) => wt.path === huskPath)) {
-				if (
-					(await fsio.exists(huskPath)) &&
-					!(await fsio.exists(`${huskPath}/.git`))
-				) {
-					await fsio.remove(huskPath);
-					const retry = await exec("wt", createArgs, { cwd: repoPath });
-					after = await listWorktrees(repoPath);
-					spawned = findWorktree(after, name, branch);
-					if (spawned) return spawned;
-					const retryDetail = [retry.stderr, retry.stdout]
-						.filter((s) => s?.trim())
-						.join("\n")
-						.trim();
-					if (retryDetail) detail = retryDetail;
-				}
-			}
+			// A refusal, missing registration or missing .git is never proof that
+			// a directory belongs to us. Leave every leftover for manual inspection.
 
 			const suffix = detail ? `: ${detail.slice(0, 500)}` : "";
 			throw new Error(`failed to spawn worktree: ${name}${suffix}`);
@@ -305,12 +267,9 @@ export function createResolverIO(
 			// uncommitted changes). `exec` never rejects, so reset/clean are
 			// inherently best-effort; only `wt remove`'s exit code is load-bearing.
 			await exec("git", ["reset", "--hard", "HEAD"], { cwd: worktree.path });
-			// `-x`, not just `-fd`: without it the IGNORED artifacts survive, and a
-			// platform worktree carries a pnpm `node_modules/.pnpm` store of ~1.5G.
-			// That bulk is exactly what an interrupted background delete used to
-			// leave behind (see the settle note below), so clearing it synchronously
-			// here means even a failed removal cannot strand gigabytes.
-			await exec("git", ["clean", "-fdx"], { cwd: worktree.path });
+			// Explicit manual removal retains its historical untracked cleanup;
+			// ignored output must not be preemptively erased if removal later fails.
+			await exec("git", ["clean", "-fd"], { cwd: worktree.path });
 			// Same flag placement as switch: `remove --yes`, not `--yes remove`.
 			const { exitCode } = await exec(
 				"wt",
@@ -320,22 +279,8 @@ export function createResolverIO(
 			if (exitCode !== 0) {
 				throw new Error(`failed to remove worktree: ${worktree.name}`);
 			}
-			// `wt remove` deletes in the BACKGROUND and exits 0 as soon as that is
-			// under way, so exit 0 alone is not proof the path is free.
-			//
-			// wt < 0.79 deleted in place, so an interrupted pass (daemon restart,
-			// process-group kill, sleep) left a directory that was no longer a
-			// registered worktree and had no `.git` — and `wt switch` then refused it
-			// forever with "Directory already exists", wedging EVERY future run on
-			// that branch. ~37G of such husks accumulated here, each holding only the
-			// ignored `node_modules/.pnpm` that the delete never reached.
-			//
-			// wt >= 0.79 renames the worktree aside first, so the path is released
-			// before the command returns (measured: 0.096s to return vs 0.77s to
-			// actually delete 100k files) and this settle is a single `stat` that
-			// returns immediately. Kept anyway: it costs nothing on a fixed wt and
-			// is the only thing standing between an older/downgraded wt and a
-			// permanently wedged branch.
+			// Some provider versions return before deletion ends. Wait for the
+			// original path to disappear and surface leftovers without erasing them.
 			await settleRemoval(worktree.path, repoPath);
 			// Best-effort: wt may have already deleted the branch.
 			await exec("git", ["branch", "-D", worktree.branch], { cwd: repoPath });
