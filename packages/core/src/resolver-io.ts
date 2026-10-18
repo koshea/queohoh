@@ -51,8 +51,11 @@ export const defaultResolverFs: ResolverFs = {
 		try {
 			await lstat(path);
 			return true;
-		} catch {
-			return false;
+		} catch (error) {
+			// Only ENOENT proves absence. Permission/I/O errors leave removal
+			// unknown and must stop teardown before branch deletion.
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+			throw error;
 		}
 	},
 };
