@@ -515,3 +515,75 @@ export function executeVerify(
 		});
 	});
 }
+
+/** Opt-in shell-out deadline used by discovery. execFile cannot create a
+ * detached group, and its timeout sends a catchable signal only to the direct
+ * child. Own the group here so a hung bash/gh tree cannot keep discovery alive.
+ * Keep execFile's 1 MiB per-stream ceiling: discovery expects complete JSON,
+ * so truncated output must fail rather than silently produce partial tasks. */
+export function executeBoundedCommand(
+	command: string,
+	args: string[],
+	opts: { cwd: string; timeoutMs: number },
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+	return new Promise((resolve) => {
+		const limit = 1024 * 1024;
+		let stdout = "";
+		let stderr = "";
+		let stdoutBytes = 0;
+		let stderrBytes = 0;
+		let settled = false;
+		let timeout: ReturnType<typeof setTimeout> | undefined;
+		const finish = (exitCode: number) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timeout);
+			resolve({ stdout, stderr, exitCode });
+		};
+		let child: ChildProcess;
+		try {
+			child = spawn(command, args, {
+				cwd: opts.cwd,
+				detached: true,
+				stdio: ["ignore", "pipe", "pipe"],
+			});
+		} catch (err) {
+			stderr = err instanceof Error ? err.message : String(err);
+			finish(1);
+			return;
+		}
+		const stop = () => {
+			if (child.pid) {
+				try {
+					process.kill(-child.pid, "SIGKILL");
+				} catch {
+					child.kill("SIGKILL");
+				}
+			}
+			// Even an escaped descendant holding a pipe cannot postpone the
+			// deadline. Normal descendants are killed with the owned group.
+			child.stdout?.destroy();
+			child.stderr?.destroy();
+			finish(1);
+		};
+		child.stdout?.setEncoding("utf8");
+		child.stderr?.setEncoding("utf8");
+		child.stdout?.on("data", (chunk: string) => {
+			stdoutBytes += Buffer.byteLength(chunk);
+			if (stdoutBytes > limit) stop();
+			else stdout += chunk;
+		});
+		child.stderr?.on("data", (chunk: string) => {
+			stderrBytes += Buffer.byteLength(chunk);
+			if (stderrBytes > limit) stop();
+			else stderr += chunk;
+		});
+		child.on("error", (err) => {
+			stderr = err.message;
+			finish(1);
+		});
+		child.on("close", (code) => finish(code ?? 1));
+		timeout = setTimeout(stop, opts.timeoutMs);
+		timeout.unref();
+	});
+}

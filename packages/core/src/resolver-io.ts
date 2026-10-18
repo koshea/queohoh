@@ -5,15 +5,26 @@ import {
 	type ResolverIO,
 	type WorktreeInfo,
 } from "./resolver.js";
+import { executeBoundedCommand } from "./runner.js";
 
 export type Exec = (
 	command: string,
 	args: string[],
-	opts: { cwd: string },
+	/** `timeoutMs` is OPTIONAL and off by default, so every existing caller keeps
+	 * waiting indefinitely exactly as before. Pass it where a hang is worse than
+	 * a failure — see `discoverItems`, where an unbounded shell-out could
+	 * permanently wedge a definition's cron. */
+	opts: { cwd: string; timeoutMs?: number },
 ) => Promise<{ stdout: string; stderr?: string; exitCode: number }>;
 
-export const defaultExec: Exec = (command, args, opts) =>
-	new Promise((resolve) => {
+export const defaultExec: Exec = (command, args, opts) => {
+	if (opts.timeoutMs !== undefined && opts.timeoutMs > 0) {
+		return executeBoundedCommand(command, args, {
+			cwd: opts.cwd,
+			timeoutMs: opts.timeoutMs,
+		});
+	}
+	return new Promise((resolve) => {
 		execFile(command, args, { cwd: opts.cwd }, (error, stdout, stderr) => {
 			const exitCode =
 				error && typeof error.code === "number" ? error.code : error ? 1 : 0;
@@ -24,6 +35,7 @@ export const defaultExec: Exec = (command, args, opts) =>
 			});
 		});
 	});
+};
 
 export function parseWorktreePorcelain(output: string): WorktreeInfo[] {
 	const result: WorktreeInfo[] = [];

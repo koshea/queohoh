@@ -15,7 +15,7 @@ import {
 	SessionLineageStore,
 	SessionRegistry,
 } from "@queohoh/core";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Engine } from "../engine.js";
 
 /** Working provider table for tests that need a multi-provider chain.
@@ -65,6 +65,7 @@ function engineWith(
 	config: GlobalConfig,
 	now: () => number,
 	isCronDisabled?: (key: string) => boolean,
+	execOverride?: Exec,
 ) {
 	const stateDir = mkdtempSync(join(tmpdir(), "qoo-state-"));
 	const store = new QueueStore(join(stateDir, "queue"));
@@ -74,7 +75,7 @@ function engineWith(
 		registry: new SessionRegistry(join(stateDir, "sessions.json")),
 		config,
 		resolverIO: noopResolverIO,
-		exec: noopExec,
+		exec: execOverride ?? noopExec,
 		isCronDisabled,
 		executeClaude: async () => ({
 			exitCode: 0,
@@ -180,5 +181,116 @@ describe("Engine cron firing", () => {
 		await engine.tick();
 		await settle();
 		expect(store.list().filter((t) => t.source === "cron")).toHaveLength(1);
+	});
+});
+
+/**
+ * A hung `fireCron` must not retire a definition's cron.
+ *
+ * `evaluateCrons` guards each key with `cronInFlight` and only a SETTLED fire
+ * releases it. Discovery shells out to operator code, so a network hang used to
+ * leave the key in-flight forever: that definition never fired again, silently,
+ * while every other one kept going. pr-hygiene sat dead for 12 hours this way
+ * and only a daemon restart brought it back.
+ */
+describe("Engine cron watchdog", () => {
+	/** A workspace whose def runs discovery, so `fireCron` shells out. */
+	function workspaceWithDiscovery(cronExpr: string) {
+		const workspace = mkdtempSync(join(tmpdir(), "qoo-ws-"));
+		const repoPath = mkdtempSync(join(tmpdir(), "qoo-repo-"));
+		const taskDir = join(workspace, "demo", "tasks", "ping");
+		mkdirSync(taskDir, { recursive: true });
+		writeFileSync(
+			join(taskDir, "config.yaml"),
+			`description: ping\ncron: "${cronExpr}"\nworktree: repo\ndedup: none\nmodel: claude/claude-sonnet-5\ndiscovery:\n  command: echo '[]'\n  item_key: "{{id}}"\n`,
+		);
+		writeFileSync(join(taskDir, "prompt.md"), "ping\n");
+		const config: GlobalConfig = {
+			workspace,
+			projects: [{ name: "demo", path: repoPath }],
+			maxConcurrentTasks: 3,
+			purgeAfterDays: 7,
+			archiveAfterDays: 7,
+			vars: {},
+			catalog: BUILTIN_CATALOG,
+			defaultModels: ["claude/claude-opus-5", "grok/grok-4.5"],
+			providers: TEST_PROVIDERS,
+		};
+		return { config };
+	}
+
+	it("an expired fire must not release its replacement's guard", async () => {
+		const { config } = workspaceWithDiscovery("* * * * *");
+		let clock = at(2026, 7, 14, 15, 19);
+		const finish: Array<() => void> = [];
+		const hangingExec: Exec = async (command) => {
+			if (command !== "/bin/bash") return { stdout: "", exitCode: 0 };
+			return new Promise((resolve) => {
+				finish.push(() => resolve({ stdout: "[]", exitCode: 0 }));
+			});
+		};
+		const { engine } = engineWith(config, () => clock, undefined, hangingExec);
+		vi.useFakeTimers();
+		try {
+			await engine.tick(); // seed at 15:19
+			clock = at(2026, 7, 14, 15, 20);
+			await engine.tick(); // first fire hangs
+			expect(finish).toHaveLength(1);
+			await vi.advanceTimersByTimeAsync(13 * 60_000);
+			clock = at(2026, 7, 14, 15, 33);
+			await engine.tick(); // watchdog permits a replacement
+			expect(finish).toHaveLength(2);
+			finish[0]?.(); // old fire finally settles while replacement is pending
+			await vi.advanceTimersByTimeAsync(60_000);
+			clock = at(2026, 7, 14, 15, 34);
+			await engine.tick();
+			expect(finish).toHaveLength(2);
+		} finally {
+			for (const resolve of finish) resolve();
+			await vi.advanceTimersByTimeAsync(0);
+			vi.useRealTimers();
+		}
+	});
+
+	it("releases the in-flight guard so a later slot still fires after a hung discovery", async () => {
+		const { config } = workspaceWithDiscovery("*/20 * * * *");
+		let clock = at(2026, 7, 14, 15, 19);
+		let discoveries = 0;
+		// Discovery never resolves — the exact shape of the wedge.
+		const hangingExec: Exec = async (command) => {
+			if (command === "/bin/bash") {
+				discoveries += 1;
+				return new Promise(() => {}); // never settles
+			}
+			return { stdout: "", exitCode: 0 };
+		};
+		const { engine } = engineWith(config, () => clock, undefined, hangingExec);
+
+		vi.useFakeTimers();
+		try {
+			await engine.tick(); // seed
+			clock = at(2026, 7, 14, 15, 20);
+			await engine.tick(); // due → fire starts and hangs
+			await vi.advanceTimersByTimeAsync(20);
+			expect(discoveries).toBe(1);
+
+			// Next due slot while still in flight: correctly suppressed (no double-fire).
+			clock = at(2026, 7, 14, 15, 40);
+			await engine.tick();
+			await vi.advanceTimersByTimeAsync(20);
+			expect(discoveries).toBe(1);
+
+			// Past the watchdog: the guard is released even though the fire is STILL
+			// hung, which is the whole point — recovery cannot depend on it settling.
+			await vi.advanceTimersByTimeAsync(13 * 60_000);
+
+			clock = at(2026, 7, 14, 16, 0);
+			await engine.tick();
+			await vi.advanceTimersByTimeAsync(20);
+			// The cron is alive again rather than silently retired forever.
+			expect(discoveries).toBe(2);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
