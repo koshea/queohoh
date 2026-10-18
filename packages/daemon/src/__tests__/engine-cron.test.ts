@@ -212,6 +212,7 @@ describe("Engine cron watchdog", () => {
 			maxConcurrentTasks: 3,
 			purgeAfterDays: 7,
 			archiveAfterDays: 7,
+			worktreeRetentionDays: null,
 			vars: {},
 			catalog: BUILTIN_CATALOG,
 			defaultModels: ["claude/claude-opus-5", "grok/grok-4.5"],

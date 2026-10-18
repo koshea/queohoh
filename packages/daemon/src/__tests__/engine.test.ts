@@ -1912,7 +1912,11 @@ describe("worktree-deletion archive", () => {
 			});
 			store.update(t.id, {
 				status,
-				target: { repo: "platform", ref: "worktree:TICK-1", worktree: "TICK-1" },
+				target: {
+					repo: "platform",
+					ref: "worktree:TICK-1",
+					worktree: "TICK-1",
+				},
 			});
 
 			await engine.tick();

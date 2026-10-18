@@ -331,9 +331,7 @@ describe("ApiServer", () => {
 		const state = (await client.call("state")) as {
 			projects: { name: string; githubId?: string }[];
 		};
-		expect(state.projects).toEqual([
-			{ name: "platform", githubId: "alice" },
-		]);
+		expect(state.projects).toEqual([{ name: "platform", githubId: "alice" }]);
 	});
 
 	it("enqueue creates an adhoc task and reports state", async () => {

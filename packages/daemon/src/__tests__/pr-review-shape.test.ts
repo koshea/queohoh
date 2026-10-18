@@ -194,9 +194,7 @@ describe("pr-review port shape", () => {
 		expect(created).toHaveLength(1);
 		const task = store.list()[0];
 		expect(task?.definition).toBe("platform/pr-review");
-		expect(task?.itemKey).toBe(
-			"https://github.com/acme/platform/pull/1423",
-		);
+		expect(task?.itemKey).toBe("https://github.com/acme/platform/pull/1423");
 		expect(task?.target.ref).toBe("pr:1423");
 		expect(task?.prompt).toContain(
 			"reviewing PR #1423 on acme/platform as alice",

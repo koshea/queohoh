@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import type {
 	ClaudeExecutor,
 	Exec,
@@ -40,6 +41,21 @@ import {
 } from "@queohoh/core";
 import { firstEnabledProvider } from "./settings-store.js";
 import { inProcessSpawner, type ShimSpawner } from "./shim-host.js";
+import {
+	taskTargetsWorktreeNames,
+	worktreeNameAliases,
+} from "./worktree-names.js";
+import {
+	cleanupTaskMatch,
+	cleanupUnambiguousRepos,
+	cleanupWorktreeNames,
+	freshCleanupFacts,
+} from "./worktree-reap.js";
+
+export {
+	taskTargetsWorktreeNames,
+	worktreeNameAliases,
+} from "./worktree-names.js";
 
 /**
  * Adoption verdict for a task that is `running` on disk but not managed by THIS
@@ -235,55 +251,6 @@ const TERMINAL_STATUSES: ReadonlySet<TaskInstance["status"]> = new Set([
 	"verify-failed",
 ]);
 
-/**
- * Name forms that all mean the same worktree directory: full `repo.branch`,
- * stripped display name, and the caller's request string. Used when cancelling
- * tasks that target a worktree being removed.
- */
-export function worktreeNameAliases(
-	repo: string,
-	canonicalName: string,
-	requestName: string,
-): Set<string> {
-	const names = new Set<string>([canonicalName, requestName]);
-	const prefix = `${repo}.`;
-	if (canonicalName.startsWith(prefix)) {
-		names.add(canonicalName.slice(prefix.length));
-	} else {
-		names.add(`${prefix}${canonicalName}`);
-	}
-	if (requestName && requestName !== canonicalName) {
-		if (requestName.startsWith(prefix)) {
-			names.add(requestName.slice(prefix.length));
-		} else {
-			names.add(`${prefix}${requestName}`);
-		}
-	}
-	return names;
-}
-
-/**
- * Whether a task is bound to one of the worktree names (resolved
- * `target.worktree`, or an unresolved `worktree:<name>` ref that would land
- * there). Does not use `laneKey` — a shared definition lane on another
- * worktree must not be cancelled when this worktree is removed.
- */
-export function taskTargetsWorktreeNames(
-	task: TaskInstance,
-	repo: string,
-	names: ReadonlySet<string>,
-): boolean {
-	if (task.target.repo !== repo) return false;
-	const wt = task.target.worktree;
-	if (wt !== null && wt !== REPO_SENTINEL && names.has(wt)) return true;
-	// Unresolved yet: ref still points at a worktree name that is going away.
-	if (wt === null) {
-		const m = /^worktree:(.+)$/.exec(task.target.ref);
-		if (m?.[1] && names.has(m[1])) return true;
-	}
-	return false;
-}
-
 export interface EngineDeps {
 	store: QueueStore;
 	runStore: RunStore;
@@ -356,10 +323,14 @@ export class Engine {
 	// the worktree-deletion sweep against a seeded-empty cache (cold start or a
 	// never-listable repo), where "worktree absent" would be a false positive.
 	private worktreeListingOk = new Set<string>();
-	/** Repos whose last `gh pr list` actually answered. A failed lookup leaves
-	 * every `prNumber` null, which is indistinguishable from "no open PR" — the
-	 * reap sweep requires this before trusting that absence. */
-	private prListingOk = new Set<string>();
+	// Cleanup may wait on git/gh; keep a separate single flight so scheduling
+	// always progresses while a conservative removal attempt is pending.
+	private cleanupInFlight: Promise<void> | null = null;
+	// Failed preflights may involve network calls; retry at most once a minute.
+	private cleanupAttemptedAt = new Map<string, number>();
+	// Manual create/remove and automatic cleanup share aliases for one lane.
+	// Reserve synchronously before awaiting IO so a name cannot be reused mid-reap.
+	private worktreeOperations = new Set<string>();
 	// Git enrichment, keyed by worktree PATH, refreshed off the hot pass() path.
 	private gitEnrichCache = new Map<string, GitEnrichment>();
 	private gitEnrichFetchedAt = new Map<string, number>(); // path -> last fetch (ms)
@@ -477,44 +448,49 @@ export class Engine {
 	 * this discards any uncommitted changes.
 	 */
 	async removeWorktree(repo: string, name: string): Promise<void> {
-		const repoPath = this.repoPath(repo);
-		if (repoPath === null) throw new Error(`unknown repo: ${repo}`);
-		const list = await this.deps.resolverIO.listWorktrees(repoPath);
-		const wt = list.find(
-			(w) => w.name === name || w.name === `${repo}.${name}`,
-		);
-		if (!wt) throw new Error(`worktree not found: ${repo}:${name}`);
-		const protectedNames = loadProjectProtectedWorktrees(
-			projectWorkspaceDir(this.deps.config, repo),
-		);
-		if (isProtectedWorktree(repoPath, repo, protectedNames, wt)) {
-			throw new Error(
-				`Worktree "${wt.name}" is protected and cannot be removed`,
+		const release = this.reserveWorktreeOperation(repo, name);
+		try {
+			const repoPath = this.repoPath(repo);
+			if (repoPath === null) throw new Error(`unknown repo: ${repo}`);
+			const list = await this.deps.resolverIO.listWorktrees(repoPath);
+			const wt = list.find(
+				(w) => w.name === name || w.name === `${repo}.${name}`,
 			);
-		}
-		if (this.deps.isWorktreeFavorite?.(`${repo}/${wt.name}`)) {
-			throw new Error(
-				`Worktree "${wt.name}" is favorited and cannot be removed — unfavorite it first`,
+			if (!wt) throw new Error(`worktree not found: ${repo}:${name}`);
+			const protectedNames = loadProjectProtectedWorktrees(
+				projectWorkspaceDir(this.deps.config, repo),
 			);
-		}
-		this.cancelLiveTasksForWorktree(
-			repo,
-			worktreeNameAliases(repo, wt.name, name),
-			"worktree removed",
-		);
-		await this.deps.resolverIO.removeWorktree(repoPath, wt);
-		// Drop only the removed worktree from the cache. Clearing the whole repo
-		// list left listingOk true + empty/missing cache until the next refresh,
-		// so the purge sweep treated *every* other worktree as gone.
-		const cached = this.worktreeCache.get(repo);
-		if (cached) {
-			this.worktreeCache.set(
+			if (isProtectedWorktree(repoPath, repo, protectedNames, wt)) {
+				throw new Error(
+					`Worktree "${wt.name}" is protected and cannot be removed`,
+				);
+			}
+			if (this.deps.isWorktreeFavorite?.(`${repo}/${wt.name}`)) {
+				throw new Error(
+					`Worktree "${wt.name}" is favorited and cannot be removed — unfavorite it first`,
+				);
+			}
+			this.cancelLiveTasksForWorktree(
 				repo,
-				cached.filter((w) => w.name !== wt.name && w.path !== wt.path),
+				worktreeNameAliases(repo, wt.name, name),
+				"worktree removed",
 			);
-		} else {
-			// No cache to patch — drop listingOk so we don't purge until re-list.
-			this.worktreeListingOk.delete(repo);
+			await this.deps.resolverIO.removeWorktree(repoPath, wt);
+			// Drop only the removed worktree from the cache. Clearing the whole repo
+			// list left listingOk true + empty/missing cache until the next refresh,
+			// so the purge sweep treated *every* other worktree as gone.
+			const cached = this.worktreeCache.get(repo);
+			if (cached) {
+				this.worktreeCache.set(
+					repo,
+					cached.filter((w) => w.name !== wt.name && w.path !== wt.path),
+				);
+			} else {
+				// No cache to patch — drop listingOk so we don't purge until re-list.
+				this.worktreeListingOk.delete(repo);
+			}
+		} finally {
+			release();
 		}
 	}
 
@@ -559,23 +535,28 @@ export class Engine {
 	 * Create a worktree for `name` (the new branch) in `repo`. Rejects an unknown
 	 * repo or a branch that already has a worktree; otherwise delegates to the
 	 * resolver IO (`wt switch -c`) and invalidates the cache so the next snapshot
-	 * lists it. No busy-guard — creation can't collide with a running task.
+	 * lists it. A synchronous reservation prevents races with automatic cleanup.
 	 */
 	/** Returns the created worktree's absolute path (the TUI opens a tmux
 	 * window there after a create). */
 	async createWorktree(repo: string, name: string): Promise<string> {
-		const repoPath = this.repoPath(repo);
-		if (repoPath === null) throw new Error(`unknown repo: ${repo}`);
-		const list = await this.deps.resolverIO.listWorktrees(repoPath);
-		if (list.some((w) => w.branch === name || w.name === `${repo}.${name}`)) {
-			throw new Error(`worktree already exists: ${name}`);
+		const release = this.reserveWorktreeOperation(repo, name);
+		try {
+			const repoPath = this.repoPath(repo);
+			if (repoPath === null) throw new Error(`unknown repo: ${repo}`);
+			const list = await this.deps.resolverIO.listWorktrees(repoPath);
+			if (list.some((w) => w.branch === name || w.name === `${repo}.${name}`)) {
+				throw new Error(`worktree already exists: ${name}`);
+			}
+			const spawned = await this.deps.resolverIO.spawnWorktree(repoPath, name);
+			// Invalidate listing trust until the next successful refresh (do not leave
+			// listingOk + missing cache — that falsely orphans every WT).
+			this.worktreeCache.delete(repo);
+			this.worktreeListingOk.delete(repo);
+			return spawned.path;
+		} finally {
+			release();
 		}
-		const spawned = await this.deps.resolverIO.spawnWorktree(repoPath, name);
-		// Invalidate listing trust until the next successful refresh (do not leave
-		// listingOk + missing cache — that falsely orphans every WT).
-		this.worktreeCache.delete(repo);
-		this.worktreeListingOk.delete(repo);
-		return spawned.path;
 	}
 
 	private repoPath(repo: string): string | null {
@@ -769,10 +750,7 @@ export class Engine {
 			}
 		}
 		// Archived rows for a deleted worktree (and cancelled after stop settle).
-		for (const t of [
-			...deps.store.list(),
-			...deps.store.listArchived(),
-		]) {
+		for (const t of [...deps.store.list(), ...deps.store.listArchived()]) {
 			const wt = t.target.worktree;
 			if (wt === null || wt === REPO_SENTINEL) continue;
 			if (!this.worktreeListingOk.has(t.target.repo)) continue;
@@ -784,22 +762,14 @@ export class Engine {
 			deps.store.purge(t.id);
 		}
 
-		// Worktree reap runs BEFORE the age purge below on purpose: it proves a
-		// worktree is queohoh's own by finding a task that targets it, and the
-		// age purge is what eventually deletes those records. Keep
-		// `worktree_retention_days` <= `purge_after_days` so the reap still sees
-		// the evidence; if the records go first the worktree is left alone.
-		await this.sweepWorktrees(now);
-
 		// Age purge: terminal tasks past purge_after_days (live or archived). A
 		// favorited row must never be silently hard-deleted by age (unlike the
 		// WORKTREE-GONE purges above, which stay unguarded by design).
-		for (const t of [
-			...deps.store.list(),
-			...deps.store.listArchived(),
-		]) {
+		const ageTasks = [...deps.store.list(), ...deps.store.listArchived()];
+		const activityEvidence = this.retainedWorktreeActivity(ageTasks);
+		for (const t of ageTasks) {
 			if (!TERMINAL_STATUSES.has(t.status)) continue;
-			if (t.favorite) continue;
+			if (t.favorite || activityEvidence.has(t.id)) continue;
 			const days = purgeDaysFor(t);
 			const cutoff = now - days * 86_400_000;
 			if (terminalEpoch(t) < cutoff) {
@@ -827,6 +797,7 @@ export class Engine {
 		for (const task of decision.start) {
 			this.startWorker(task);
 		}
+		void this.refreshWorktreeCleanup();
 	}
 
 	/** Every definition with a non-null `cron`, across all projects. Global defs
@@ -988,98 +959,277 @@ export class Engine {
 		}
 	}
 
-	/**
-	 * Reap worktrees queohoh itself spawned, once their work has settled. Two
-	 * classes share one guard set:
-	 *   ephemeral — a `temp` ref's throwaway worktree (`ephemeralWorktree` on the
-	 *     task). Reaped as soon as nothing live targets it; no age gate. This is
-	 *     the flag's original intent — it was persisted and read by nobody, so
-	 *     adhoc worktrees accumulated forever.
-	 *   persistent — `{repo}.{branch}` from a pr/ticket/branch ref. Reaped only
-	 *     after `worktree_retention_days` of idleness; absent config ⇒ never.
-	 *
-	 * Guards, any one of which skips the worktree: `protected_worktrees`, a
-	 * favorite, an OPEN PR on its branch (and, for the age-gated class, gh being
-	 * able to answer at all), and an unclean — or unknown — tree.
-	 *
-	 * Provenance is the `${repo}.` prefix — the exact shape `spawnWorktree`
-	 * creates. A hand-made checkout (`platform-dns`, `platform-hotfix`) can
-	 * therefore never be reaped however old and idle it looks, and neither can a
-	 * worktree with no task record at all. That asymmetry is deliberate: the cost
-	 * of skipping a reap is disk, the cost of a wrong reap is someone's tree.
-	 *
-	 * Idleness is the NEWEST of the last commit and the last task to settle, so a
-	 * worktree committed to by hand after its task finished is not reaped out
-	 * from under that work.
-	 */
-	private async sweepWorktrees(now: number): Promise<void> {
-		const { deps } = this;
-		const byRepo = this.worktreesByRepo();
-		for (const [repo, worktrees] of Object.entries(byRepo)) {
-			// Only act on a listing we trust — the same conservatism the task
-			// purge uses. A failed/cold list must never read as "reap everything".
+	/** Retain the latest terminal activity record until a present worktree can
+	 * complete its configured retention lifecycle. Otherwise purge_after_days
+	 * (default 14) deletes our idleness evidence before retention >=14 qualifies.
+	 * This retains one existing history row per tree, never confers ownership,
+	 * and ordinary task purging resumes when worktree retention is disabled. */
+	private retainedWorktreeActivity(
+		tasks: readonly TaskInstance[],
+	): Set<string> {
+		const retained = new Set<string>();
+		if (
+			!this.deps.resolverIO.ownedWorktreeToken ||
+			!this.deps.resolverIO.removeOwnedWorktree
+		)
+			return retained;
+		for (const [repo, worktrees] of this.worktreeCache) {
 			if (!this.worktreeListingOk.has(repo)) continue;
-			const retentionDays = loadProjectWorktreeRetentionDays(
-				projectWorkspaceDir(deps.config, repo),
-				deps.config.worktreeRetentionDays,
-			);
-			// One snapshot per repo rather than two store reads per worktree. Safe
-			// to reuse across the loop: only worktrees with no live task are
-			// reaped, so removeWorktree cancels nothing and purges nothing here.
-			const allTasks = [...deps.store.list(), ...deps.store.listArchived()];
+			if (
+				loadProjectWorktreeRetentionDays(
+					projectWorkspaceDir(this.deps.config, repo),
+					this.deps.config.worktreeRetentionDays,
+				) === null
+			)
+				continue;
 			for (const wt of worktrees) {
-				if (!wt.name.startsWith(`${repo}.`)) continue; // not ours to reap
-				if (wt.protected === true) continue;
-				if (wt.favorite === true) continue;
-				// An open PR means the branch is still in play — a review comment
-				// lands and the operator wants the tree there to answer it.
-				if (typeof wt.prNumber === "number") continue;
-				// Uncommitted work is the one thing removal destroys, so unknown
-				// (enrichment cold or git failed) blocks just like dirty.
-				if (wt.dirty !== false) continue;
-
-				const names = worktreeNameAliases(repo, wt.name, wt.name);
-				let live = false;
-				let ephemeral = false;
-				let newestSettle = 0;
-				let owned = false;
-				for (const t of allTasks) {
-					if (!taskTargetsWorktreeNames(t, repo, names)) continue;
-					owned = true;
-					if (!TERMINAL_STATUSES.has(t.status)) {
-						live = true;
-						break;
+				const names = cleanupWorktreeNames(repo, wt);
+				let latest: TaskInstance | undefined;
+				let latestMs = -Infinity;
+				for (const task of tasks) {
+					if (
+						!TERMINAL_STATUSES.has(task.status) ||
+						cleanupTaskMatch(task, repo, names) !== true
+					)
+						continue;
+					const ms = Date.parse(task.finishedAt ?? task.created);
+					if (!Number.isFinite(ms) || ms <= 0) {
+						retained.add(task.id); // unknown activity age cannot authorize a reap
+					} else if (ms > latestMs) {
+						latest = task;
+						latestMs = ms;
 					}
-					if (t.ephemeralWorktree) ephemeral = true;
-					const ms = Date.parse(t.finishedAt ?? t.created);
-					if (!Number.isNaN(ms) && ms > newestSettle) newestSettle = ms;
 				}
-				if (live || !owned) continue;
+				if (latest) retained.add(latest.id);
+			}
+		}
+		return retained;
+	}
 
-				if (!ephemeral) {
-					if (retentionDays === null) continue;
-					// The open-PR guard above is only meaningful if gh answered;
-					// otherwise a live PR reads as no PR. Ephemeral worktrees skip
-					// this — they are throwaway by construction, and a gh-less
-					// machine must still reap them.
-					if (!this.prListingOk.has(repo)) continue;
-					const lastCommitMs = (wt.lastCommitEpoch ?? 0) * 1000;
-					const idleSince = Math.max(newestSettle, lastCommitMs);
-					// No usable timestamp at all ⇒ leave it; never reap on a guess.
-					if (idleSince === 0) continue;
-					if (idleSince >= now - retentionDays * 86_400_000) continue;
-				}
+	/** Background, single-flight cleanup; callers may await this for shutdown or
+	 * deterministic tests. Cached facts nominate candidates only: every actual
+	 * removal needs durable ownership and fresh, successful git + OPEN PR checks.
+	 * No task is cancelled to make a candidate eligible. */
+	refreshWorktreeCleanup(): Promise<void> {
+		if (this.cleanupInFlight) return this.cleanupInFlight;
+		this.cleanupInFlight = this.sweepWorktrees()
+			.catch((err) => {
+				console.error("worktree cleanup failed:", err);
+			})
+			.finally(() => {
+				this.cleanupInFlight = null;
+			});
+		return this.cleanupInFlight;
+	}
 
+	/** A synchronous operation token closes create/remove races across awaits.
+	 * Callers receive an explicit retry error rather than silently losing work. */
+	private reserveWorktreeOperation(
+		repo: string,
+		name: string,
+		names = worktreeNameAliases(repo, name, name),
+	): () => void {
+		const keys = [...names].map((alias) => `${repo}:${alias}`);
+		if (keys.some((key) => this.worktreeOperations.has(key))) {
+			throw new Error(
+				`worktree operation in progress for ${repo}/${name}; retry shortly`,
+			);
+		}
+		for (const key of keys) this.worktreeOperations.add(key);
+		return () => {
+			for (const key of keys) this.worktreeOperations.delete(key);
+		};
+	}
+
+	/** Re-read mutable protections at every boundary, including the resolver's
+	 * final synchronous callback immediately before its non-force git removal.
+	 * Task history is an eligibility hint, never proof that we created a tree. */
+	private cleanupAllowed(
+		repo: string,
+		wt: WorktreeInfo,
+		lastCommitMs: number | null,
+		reload = true,
+	): boolean {
+		const { deps } = this;
+		const now = deps.now?.() ?? Date.now();
+		if (!Number.isFinite(now) || now <= 0) return false;
+		const path = this.repoPath(repo);
+		if (
+			path === null ||
+			isProtectedWorktree(
+				path,
+				repo,
+				loadProjectProtectedWorktrees(projectWorkspaceDir(deps.config, repo)),
+				wt,
+			)
+		)
+			return false;
+		if (deps.isWorktreeFavorite?.(`${repo}/${wt.name}`)) return false;
+		const names = cleanupWorktreeNames(repo, wt);
+		if (
+			deps.registry.list().some((session) => {
+				if (
+					session.lane !== null &&
+					[...names].some((name) => session.lane === `${repo}:${name}`)
+				)
+					return true;
+				if (session.cwd === null) return false;
 				try {
-					await this.removeWorktree(repo, wt.name);
-					console.log(
-						`reaped ${ephemeral ? "ephemeral" : "idle"} worktree ${repo}/${wt.name}`,
+					// Heartbeats may arrive through symlinks or contain '..'. A raw
+					// prefix check could miss a session actually inside this checkout.
+					const cwd = realpathSync(session.cwd);
+					const worktreePath = realpathSync(wt.path);
+					return cwd === worktreePath || cwd.startsWith(`${worktreePath}/`);
+				} catch {
+					// An unreadable/nonexistent cwd cannot establish a different lane.
+					return true;
+				}
+			})
+		)
+			return false;
+		// External file enqueues can bypass the in-process reservation. Re-read
+		// before every authorization, including the resolver's final callback.
+		if (reload) deps.store.reload();
+		const allTasks = [...deps.store.list(), ...deps.store.listArchived()];
+		if (
+			deps.store.invalidFiles.length > 0 ||
+			deps.store.invalidArchiveFiles.length > 0
+		)
+			return false;
+		if (
+			allTasks.some(
+				(task) =>
+					cleanupTaskMatch(task, repo, names) === null &&
+					(task.favorite || !TERMINAL_STATUSES.has(task.status)),
+			)
+		)
+			return false;
+		const tasks = allTasks.filter(
+			(task) => cleanupTaskMatch(task, repo, names) === true,
+		);
+		if (
+			tasks.length === 0 ||
+			tasks.some((task) => task.favorite || !TERMINAL_STATUSES.has(task.status))
+		)
+			return false;
+		if (
+			lastCommitMs !== null &&
+			(!Number.isFinite(lastCommitMs) ||
+				lastCommitMs <= 0 ||
+				lastCommitMs > now)
+		)
+			return false;
+		if (tasks.some((task) => task.ephemeralWorktree)) return true;
+		const days = loadProjectWorktreeRetentionDays(
+			projectWorkspaceDir(deps.config, repo),
+			deps.config.worktreeRetentionDays,
+		);
+		if (days === null) return false;
+		// The initial candidate check has no fresh commit yet. Check task age
+		// now, then add the freshly read commit before authorizing any removal.
+		const settled = tasks.map((task) =>
+			Date.parse(task.finishedAt ?? task.created),
+		);
+		if (
+			settled.some((time) => !Number.isFinite(time) || time <= 0 || time > now)
+		)
+			return false;
+		return Math.max(lastCommitMs ?? 0, ...settled) < now - days * 86_400_000;
+	}
+
+	private async sweepWorktrees(): Promise<void> {
+		const { deps } = this;
+		const { ownedWorktreeToken, removeOwnedWorktree } = deps.resolverIO;
+		// Older resolver implementations and naming-only/manual trees carry no
+		// deletion authority. Never fall back to the destructive manual remover.
+		if (!ownedWorktreeToken || !removeOwnedWorktree) return;
+		const byRepo = this.worktreesByRepo();
+		const livePaths = new Set(
+			Object.values(byRepo)
+				.flat()
+				.map((wt) => wt.path),
+		);
+		for (const path of this.cleanupAttemptedAt.keys()) {
+			if (!livePaths.has(path)) this.cleanupAttemptedAt.delete(path);
+		}
+		let unambiguousRepos: Set<string> | undefined;
+		for (const [repo, worktrees] of Object.entries(byRepo)) {
+			const repoPath = this.repoPath(repo);
+			if (repoPath === null || !this.worktreeListingOk.has(repo)) continue;
+			for (const wt of worktrees) {
+				if (
+					wt.dirty !== false ||
+					(wt.prState === "OPEN" && typeof wt.prNumber === "number") ||
+					!wt.branch.trim()
+				)
+					continue;
+				const attempted = this.cleanupAttemptedAt.get(wt.path);
+				const clock = Date.now();
+				if (attempted !== undefined && clock - attempted < 60_000) continue;
+				if (!this.cleanupAllowed(repo, wt, null, false)) continue;
+				this.cleanupAttemptedAt.set(wt.path, clock);
+				let releaseOperation: (() => void) | undefined;
+				let releaseStore: (() => void) | undefined;
+				try {
+					// Task lanes are project-labelled. Two labels for the same git
+					// common directory would hide each other's live work; retain
+					// those trees rather than attempt cross-label reservations.
+					unambiguousRepos ??= await cleanupUnambiguousRepos(
+						deps.config.projects,
+						deps.exec,
 					);
+					if (!unambiguousRepos.has(repo)) continue;
+					// Capture the creation identity before any async preflight. The
+					// resolver must compare this same token again at removal time.
+					const token = await ownedWorktreeToken(repoPath, wt);
+					if (!token) continue;
+					const names = cleanupWorktreeNames(repo, wt);
+					releaseOperation = this.reserveWorktreeOperation(
+						repo,
+						wt.name,
+						names,
+					);
+					releaseStore = deps.store.reserveWorktreeRemoval(repo, names);
+					if (!this.cleanupAllowed(repo, wt, null)) continue;
+					const fresh = await freshCleanupFacts(deps.exec, repoPath, wt);
+					if (
+						fresh === null ||
+						!this.cleanupAllowed(repo, wt, fresh.lastCommitMs)
+					)
+						continue;
+					const listing = await deps.resolverIO.listWorktrees(repoPath);
+					if (
+						!listing.some(
+							(entry) =>
+								entry.name === wt.name &&
+								entry.path === wt.path &&
+								entry.branch === wt.branch,
+						)
+					)
+						continue;
+					const removed = await removeOwnedWorktree(repoPath, wt, token, () =>
+						this.cleanupAllowed(repo, wt, fresh.lastCommitMs),
+					);
+					if (!removed) continue;
+					const cached = this.worktreeCache.get(repo);
+					if (cached)
+						this.worktreeCache.set(
+							repo,
+							cached.filter((entry) => entry.path !== wt.path),
+						);
+					this.gitEnrichCache.delete(wt.path);
+					this.gitEnrichFetchedAt.delete(wt.path);
 					deps.onChange?.();
 				} catch (err) {
-					// removeWorktree re-checks protected/favorite and can lose a race
-					// with a manual removal. A reap failure must never break the pass.
-					console.error(`worktree reap failed for ${repo}/${wt.name}:`, err);
+					// IO errors and a losing operation race retain both tree and
+					// task history. Reservations are always released for a retry.
+					console.error(
+						`worktree cleanup skipped for ${repo}/${wt.name}:`,
+						err,
+					);
+				} finally {
+					releaseStore?.();
+					releaseOperation?.();
 				}
 			}
 		}
@@ -1148,11 +1298,6 @@ export class Engine {
 				if (now - (this.gitEnrichFetchedAt.get(wt.path) ?? 0) < ttl) continue; // serve last-known within TTL
 				if (prMap === undefined) {
 					prMap = repoPath === null ? null : await this.ghPrMap(repoPath);
-					// A null map means gh could not answer, which is NOT the same as
-					// "no open PRs" — every prNumber below then reads null. The reap
-					// sweep must not mistake that silence for permission.
-					if (prMap === null) this.prListingOk.delete(repo);
-					else this.prListingOk.add(repo);
 				}
 				const facts = await this.computeGitEnrichment(
 					wt.path,
