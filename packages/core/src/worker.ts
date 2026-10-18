@@ -387,7 +387,11 @@ async function settleFailedWithPostRun(
 				cwd: ctx.cwd,
 			});
 		} catch (err) {
-			const msg = `post_run failed: ${err instanceof Error ? err.message : String(err)}`;
+			// Hook diagnostics can contain credentials; task state and console do
+			// not pass through the run-store redactor, so redact before either sink.
+			const msg = deps.redact(
+				`post_run failed: ${err instanceof Error ? err.message : String(err)}`,
+			);
 			console.error(`[queohoh] ${msg}`);
 			reason = reason ? `${reason}; ${msg}` : null;
 		}
@@ -483,7 +487,11 @@ export async function startRun(
 				cwd: ctx.cwd,
 			});
 		} catch (err) {
-			const reason = `pre_run failed: ${err instanceof Error ? err.message : String(err)}`;
+			// The failure also goes straight into task.error, outside run-store's
+			// redaction, so sanitize the hook's output before carrying it forward.
+			const reason = deps.redact(
+				`pre_run failed: ${err instanceof Error ? err.message : String(err)}`,
+			);
 			return settleFailedWithPostRun(taskId, ctx, deps, reason);
 		}
 	}
@@ -700,7 +708,11 @@ export async function finalizeRun(
 		try {
 			await execHook(renderHook(def.postRun), deps.exec, { cwd });
 		} catch (err) {
-			const msg = `post_run failed: ${err instanceof Error ? err.message : String(err)}`;
+			// Redact before logging or appending to task.error; neither sink uses
+			// the redactor passed to finishRun below.
+			const msg = deps.redact(
+				`post_run failed: ${err instanceof Error ? err.message : String(err)}`,
+			);
 			console.error(`[queohoh] ${msg}`);
 			reason = reason ? `${reason}; ${msg}` : null;
 		}

@@ -369,15 +369,27 @@ export function executeRun(
 			});
 		});
 
-		child.on("error", () => {
+		child.on("error", (err) => {
 			clearTimers();
+			// Surface the real errno (ENOENT for missing bin/cwd, EACCES, …) so
+			// "provider unavailable" classification still matches the
+			// `startsWith("Failed to spawn process")` check in the worker, but
+			// the run report tells the operator *why* spawn failed instead of a
+			// silent generic. Without the detail, a PATH-less daemon looks
+			// identical to a quota/auth failure.
+			const detail =
+				err instanceof Error
+					? err.message
+					: typeof err === "string"
+						? err
+						: String(err);
 			resolve({
 				exitCode: 1,
 				timedOut: false,
 				signal: null,
 				sessionId,
 				resultText: "",
-				stderr: "Failed to spawn process",
+				stderr: `Failed to spawn process: ${detail}`,
 				usage,
 			});
 		});

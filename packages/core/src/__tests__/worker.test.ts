@@ -1283,3 +1283,116 @@ describe("startRun / finalizeRun split", () => {
 		expect(store.get(t.id)?.status).toBe("done");
 	});
 });
+
+/** Hook output may contain workspace credentials; every persisted/logged sink
+ * must apply the same redactor already used for the run report. */
+describe("hook output redaction", () => {
+	const cases = [
+		{ name: "pre failure", preFails: true, postFails: false, runFails: false },
+		{
+			name: "pre and post failure",
+			preFails: true,
+			postFails: true,
+			runFails: false,
+		},
+		{
+			name: "post failure after success",
+			preFails: false,
+			postFails: true,
+			runFails: false,
+		},
+		{
+			name: "post failure after failed run",
+			preFails: false,
+			postFails: true,
+			runFails: true,
+		},
+	];
+	for (const stream of ["stderr", "stdout"] as const) {
+		it.each(cases)(`${stream}: $name redacts task and console`, async ({
+			preFails,
+			postFails,
+			runFails,
+		}) => {
+			const secret = "sk-review-fixture-secret-123";
+			const def: TaskDefinition = {
+				name: "d",
+				repo: "platform",
+				discovery: null,
+				description: null,
+				cron: null,
+				args: [],
+				dedup: "none",
+				worktree: "temp",
+				lane: null,
+				verify: null,
+				preRun: "setup",
+				postRun: "cleanup",
+				model: "claude/claude-opus-5",
+				timeoutMs: 60_000,
+				priority: "normal",
+				onDone: "stay",
+				purgeAfterDays: null,
+				prompt: "p",
+			};
+			const calls: string[] = [];
+			const executeClaude = vi.fn(async () => ({
+				...okResult,
+				exitCode: runFails ? 3 : 0,
+			}));
+			const exec: Exec = async (command, args) => {
+				if (command !== "/bin/bash") return { stdout: "", exitCode: 0 };
+				const hook = args[1] ?? "";
+				calls.push(hook);
+				if (
+					(hook === "setup" && preFails) ||
+					(hook === "cleanup" && postFails)
+				) {
+					return {
+						stdout: "",
+						stderr: "",
+						[stream]: `auth failed with ${secret}`,
+						exitCode: 1,
+					};
+				}
+				return { stdout: "", exitCode: 0 };
+			};
+			const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+			try {
+				const { deps, store, runStore } = makeDeps({
+					exec,
+					executeClaude,
+					loadDef: () => def,
+					redact: makeRedactor(new Map([[secret, "API_TOKEN"]])),
+				});
+				const task = enqueue(store, "platform/d");
+				withWorktree(store, task.id);
+				const result = await runTask(task.id, deps);
+				expect(result.status).toBe(preFails || runFails ? "failed" : "done");
+				expect(executeClaude).toHaveBeenCalledTimes(preFails ? 0 : 1);
+				expect(calls).toEqual(["setup", "cleanup"]);
+				// Reports are the already-correct reference sink; task files and logs
+				// must not bypass its redaction when carrying the new hook detail.
+				expect(JSON.stringify(runStore.readRunMeta(task.id))).not.toContain(
+					secret,
+				);
+				expect(
+					readFileSync(join(runStore.runDir(task.id), "report.md"), "utf8"),
+				).not.toContain(secret);
+				expect.soft(result.error ?? "").not.toContain(secret);
+				expect
+					.soft(readFileSync(store.taskPath(task.id), "utf8"))
+					.not.toContain(secret);
+				expect.soft(JSON.stringify(errSpy.mock.calls)).not.toContain(secret);
+				if (preFails || runFails)
+					expect.soft(result.error).toContain("[REDACTED:API_TOKEN]");
+				if (postFails)
+					expect
+						.soft(JSON.stringify(errSpy.mock.calls))
+						.toContain("[REDACTED:API_TOKEN]");
+			} finally {
+				errSpy.mockRestore();
+			}
+		});
+	}
+});

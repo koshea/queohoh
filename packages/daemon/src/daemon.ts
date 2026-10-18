@@ -17,7 +17,7 @@ import { ApiServer } from "./api.js";
 import { Engine } from "./engine.js";
 import { loadWorkspaceEnv } from "./env-loader.js";
 import { acquireLock, releaseLock } from "./lock.js";
-import { normalizeDaemonPath, probeGh } from "./path-env.js";
+import { ensureDaemonTerm, normalizeDaemonPath, probeGh } from "./path-env.js";
 import {
 	configPath,
 	pidPath,
@@ -80,6 +80,12 @@ export async function startDaemon(): Promise<{ stop: () => Promise<void> }> {
 	// one debug line per enrichment sweep. Both run before the first engine tick.
 	// See path-env.ts for the path_helper rescue asymmetry this compensates for.
 	await normalizeDaemonPath(defaultExec);
+	// Same idea as the PATH rescue, for TERM: hooks and discovery run through
+	// `bash -lc`, whose login-shell exit runs ~/.bash_logout → `clear`, which
+	// fails with no TERM and drags the hook's exit status to 1. Harmless when
+	// started from a terminal, fatal to every hook under systemd. See
+	// `ensureDaemonTerm`.
+	ensureDaemonTerm();
 	await probeGh(defaultExec);
 
 	const pid = pidPath(state);
@@ -143,7 +149,6 @@ export async function startDaemon(): Promise<{ stop: () => Promise<void> }> {
 			config.providers.filter((p) => p.enabled).map((p) => p.name),
 		onChange: () => broadcastRef(),
 	});
-
 
 	const server = new ApiServer({
 		engine,
