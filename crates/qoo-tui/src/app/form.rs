@@ -32,9 +32,12 @@ pub(super) fn builtin_catalog() -> Vec<CatalogEntry> {
         e("claude", "claude-opus-4-8", "claude-opus-4.8"),
         e("claude", "claude-sonnet-5", "claude-sonnet-5"),
         e("claude", "claude-haiku-4-5", "claude-haiku-4.5"),
-        e("grok", "grok-4.5", "grok-4.5"),
-        // Hidden from pickers (grok group offers only grok-4.5); still resolves
-        // when referenced explicitly. Mirrors catalog.ts's `hidden: true`.
+        e("grok", "grok-4.7", "grok-4.7"),
+        // Hidden from pickers (the grok group offers only grok-4.7); still
+        // resolve when referenced explicitly. Mirrors catalog.ts's `hidden`.
+        mk("grok", "grok-4.7-build-fast", "grok-4.7-build-fast", true),
+        mk("grok", "grok-4.6", "grok-4.6", true),
+        mk("grok", "grok-4.5", "grok-4.5", true),
         mk("grok", "grok-composer-2.5-fast", "grok-composer-2.5-fast", true),
     ]
 }

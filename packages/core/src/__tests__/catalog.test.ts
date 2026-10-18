@@ -24,7 +24,25 @@ describe("BUILTIN_CATALOG", () => {
 			{ provider: "claude", id: "claude-opus-5", label: "claude-opus-5" },
 			{ provider: "claude", id: "claude-sonnet-5", label: "claude-sonnet-5" },
 			{ provider: "claude", id: "claude-haiku-4-5", label: "claude-haiku-4.5" },
-			{ provider: "grok", id: "grok-4.5", label: "grok-4.5" },
+			{ provider: "grok", id: "grok-4.7", label: "grok-4.7" },
+			{
+				provider: "grok",
+				id: "grok-4.7-build-fast",
+				label: "grok-4.7-build-fast",
+				hidden: true,
+			},
+			{
+				provider: "grok",
+				id: "grok-4.6",
+				label: "grok-4.6",
+				hidden: true,
+			},
+			{
+				provider: "grok",
+				id: "grok-4.5",
+				label: "grok-4.5",
+				hidden: true,
+			},
 			{
 				provider: "grok",
 				id: "grok-composer-2.5-fast",
@@ -73,6 +91,9 @@ describe("effectiveCatalog", () => {
 		const result = effectiveCatalog(overlay) as CatalogEntry[];
 		const grokGroup = result.filter((e) => e.provider === "grok");
 		expect(grokGroup.map((e) => e.label)).toEqual([
+			"grok-4.7",
+			"grok-4.7-build-fast",
+			"grok-4.6",
 			"grok-4.5",
 			"grok-composer-2.5-fast",
 			"grok-new",

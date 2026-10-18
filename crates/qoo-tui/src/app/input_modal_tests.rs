@@ -437,7 +437,7 @@ fn session_pick_scopes_model_options_to_provider() {
                 opts.iter().all(|o| o.value.starts_with("grok/")),
                 "grok session must only offer grok models: {opts:?}"
             );
-            assert_eq!(state.fields[adhoc_field::MODEL].value, "grok/grok-4.5");
+            assert_eq!(state.fields[adhoc_field::MODEL].value, "grok/grok-4.7");
         }
         other => panic!("{other:?}"),
     }

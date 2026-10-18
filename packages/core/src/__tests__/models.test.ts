@@ -185,9 +185,7 @@ describe("resolveModelChain", () => {
 			),
 		).toEqual({
 			ok: true,
-			chain: [
-				{ provider: "grok", model: "grok-4.5", ref: "grok/grok-4.5" },
-			],
+			chain: [{ provider: "grok", model: "grok-4.5", ref: "grok/grok-4.5" }],
 		});
 		expect(
 			resolveModelChain(
@@ -236,8 +234,12 @@ describe("resolveModelChain", () => {
 		).toEqual({
 			ok: true,
 			chain: [
-				{ provider: "grok", model: "grok-4.5", ref: "grok/grok-4.5" },
-				{ provider: "claude", model: "claude-opus-5", ref: "claude/claude-opus-5" },
+				{ provider: "grok", model: "grok-4.7", ref: "grok/grok-4.7" },
+				{
+					provider: "claude",
+					model: "claude-opus-5",
+					ref: "claude/claude-opus-5",
+				},
 			],
 		});
 	});

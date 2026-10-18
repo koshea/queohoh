@@ -12,7 +12,7 @@
  * id passed to the CLI; `label` is the reference used in `model:` fields and
  * pickers (`provider/label`). Labels follow `provider-family-version` with
  * hyphens between segments and dots inside the version (e.g.
- * `claude-opus-5`, `grok-4.5`) so the version is visible in the TUI without
+ * `claude-opus-5`, `grok-4.7`) so the version is visible in the TUI without
  * a separate short alias. `hidden` affects pickers only — a hidden entry
  * still resolves when referenced explicitly. */
 export interface CatalogEntry {
@@ -34,9 +34,29 @@ export const BUILTIN_CATALOG: CatalogEntry[] = [
 	{ provider: "claude", id: "claude-opus-5", label: "claude-opus-5" },
 	{ provider: "claude", id: "claude-sonnet-5", label: "claude-sonnet-5" },
 	{ provider: "claude", id: "claude-haiku-4-5", label: "claude-haiku-4.5" },
-	{ provider: "grok", id: "grok-4.5", label: "grok-4.5" },
-	// Hidden from pickers (the grok group offers only grok-4.5) but still
-	// resolvable when referenced explicitly — `hidden` is picker-only.
+	{ provider: "grok", id: "grok-4.7", label: "grok-4.7" },
+	// Hidden from pickers (the grok group offers only the current head) but
+	// still resolvable when referenced explicitly — `hidden` is picker-only.
+	// Old task stamps and authored `model: grok/grok-4.6` lists keep working,
+	// which matters: several task defs still name 4.6 as their fallback.
+	{
+		provider: "grok",
+		id: "grok-4.7-build-fast",
+		label: "grok-4.7-build-fast",
+		hidden: true,
+	},
+	{
+		provider: "grok",
+		id: "grok-4.6",
+		label: "grok-4.6",
+		hidden: true,
+	},
+	{
+		provider: "grok",
+		id: "grok-4.5",
+		label: "grok-4.5",
+		hidden: true,
+	},
 	{
 		provider: "grok",
 		id: "grok-composer-2.5-fast",
