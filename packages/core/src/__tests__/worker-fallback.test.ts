@@ -517,3 +517,31 @@ describe("runTask pinned resume — pin absent from resolved chain", () => {
 		expect(out.error).toBe("resume provider unavailable: grok");
 	});
 });
+
+describe("antigravity provider fallback", () => {
+	it.each([
+		"RESOURCE_EXHAUSTED: quota exceeded",
+		"authentication required",
+	])("falls back on %s", async (stderr) => {
+		const { deps, taskId, seenProviders } = makeFallbackDeps({
+			firstResult: {
+				...okResult,
+				exitCode: 1,
+				sessionId: null,
+				resultText: "",
+				stderr,
+			},
+			model: ["antigravity/gemini-3.8-flash-high", "grok/grok-4.7"],
+			activeProvider: "antigravity",
+		});
+		const providers = [
+			{ name: "antigravity", enabled: true },
+			{ name: "grok", enabled: true },
+		];
+		const first = await runTask(taskId, { ...deps, providers });
+		expect(first.status).toBe("queued");
+		const second = await runTask(taskId, { ...deps, providers });
+		expect(second.status).toBe("done");
+		expect(seenProviders).toEqual(["antigravity", "grok"]);
+	});
+});

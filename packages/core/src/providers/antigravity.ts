@@ -26,8 +26,10 @@ import type {
  * user-facing wording is NOT verified against a live quota failure (the
  * account had budget when this was written), so this stays permissive: a false
  * negative just falls back to the generic `exit code N` reason, never a crash. */
+// Headless agy reports "authentication required" when cached login is absent.
+// Classify it so the worker advances the user's provider chain.
 const UNAVAILABLE_RE =
-	/\b401\b|\b402\b|\b403\b|\b429\b|payment required|balance exhausted|usage balance|insufficient (?:credit|balance|funds)|out of credits?|resource.?exhausted|unauthorized|unauthenticated|not logged in|invalid api key|rate limit|quota|too many requests/i;
+	/\b401\b|\b402\b|\b403\b|\b429\b|payment required|balance exhausted|usage balance|insufficient (?:credit|balance|funds)|out of credits?|resource.?exhausted|unauthorized|unauthenticated|authentication required|not logged in|invalid api key|rate limit|quota|too many requests/i;
 
 /** Cap on a rendered tool-parameter blob, matching the 500-char slice the
  * claude event formatter applies — a `write_to_file` call carries the whole
